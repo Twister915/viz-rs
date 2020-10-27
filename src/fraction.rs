@@ -195,6 +195,18 @@ impl Fraction {
     fn make_same_divisor(self, other: Self) -> (Self, Self) {
         if self.denominator == other.denominator {
             (self, other)
+        } else if self.numerator == 0 {
+            (Fraction{
+                numerator: 0,
+                denominator: other.denominator,
+                simplified: true,
+            }, Fraction {
+                numerator: other.numerator,
+                denominator: other.denominator,
+                simplified: other.simplified
+            })
+        } else if other.numerator == 0 {
+            other.make_same_divisor(self)
         } else {
             let lcm = lcm(self.denominator as i64, other.denominator as i64);
             let lcm_div_self = lcm / (self.denominator as i64);
@@ -232,7 +244,13 @@ fn gcd(a: i64, b: i64) -> i64 {
 }
 
 fn lcm(a: i64, b: i64) -> i64 {
-    (a * b) / gcd(a, b)
+    if a == 1 {
+        b
+    } else if b == 1 {
+        a
+    } else {
+        (a * b) / gcd(a, b)
+    }
 }
 
 impl Default for Fraction {

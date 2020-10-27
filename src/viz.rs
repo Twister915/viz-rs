@@ -26,7 +26,7 @@ pub fn visualize(file: &str) -> Result<()> {
     let sdl_context = sdl2::init().map_err(map_sdl_err)?;
     let video_subsystem = sdl_context.video().map_err(map_sdl_err)?;
     let window = video_subsystem
-        .window("vis-rs", 1920, 1080)
+        .window("vis-rs", 1280, 720)
         .position_centered()
         .build()?;
 
@@ -55,8 +55,8 @@ pub fn visualize(file: &str) -> Result<()> {
     audio_player.resume();
     let mut last_frame_for_ts: Option<Instant> = None;
     let frame_delta = Duration::new(0, (1_000_000_000u64 / FPS) as u32);
-    let mut frame_for_offset = Duration::from_millis(DATA_WINDOW_MS / 2);
-    frame_for_offset += frame_delta.mul_f64(alpha_frame_offset());
+    let frame_for_offset = Duration::from_millis(DATA_WINDOW_MS / 2);
+    // frame_for_offset += frame_delta.mul_f64(alpha_frame_offset());
     loop {
         for event in event_pump.poll_iter() {
             match event {
@@ -118,11 +118,6 @@ pub fn visualize(file: &str) -> Result<()> {
 
 const ALPHA0: f64 = 0.85;
 const ALPHA1: f64 = 0.55;
-const MIN_OWN_INFLUENCE: f64 = 0.5;
-
-fn alpha_frame_offset() -> f64 {
-    MIN_OWN_INFLUENCE.log2() / ((1.0 - ((1.0 - ALPHA0) * (1.0 - ALPHA1))).log2())
-}
 
 fn create_data_src(file: &str) -> Result<(impl Framed<f64>, WavFile)> {
     const SEEK_BACK_LIMIT: usize = 1;
@@ -138,14 +133,14 @@ fn create_data_src(file: &str) -> Result<(impl Framed<f64>, WavFile)> {
             let frame_stride = frame_stride.rounded() as usize;
             SlidingFrame::new(wav, frame_size, frame_stride)
         })
-        .lift(move |size| BlackmanNuttall::memoized_mapper(size).into_channeled())
+        .lift(move |size| BlackmanNuttall::mapper(size).into_channeled())
         .try_lift(move |size| FramedFft::new(size))?
         .compose(move |frames| ExponentialSmoothing::new(frames, SEEK_BACK_LIMIT, ALPHA0))
         .lift(move |size| {
             SavitzkyGolayMapper::new(
                 size,
                 SavitzkyGolayConfig {
-                    window_size: 47,
+                    window_size: 45,
                     polynomial_order: 4,
                 },
             )
