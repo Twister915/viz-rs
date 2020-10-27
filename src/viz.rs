@@ -254,7 +254,7 @@ fn draw_frame(canvas: &mut WindowCanvas, frame: &[f64]) -> Result<()> {
                 by, ty, v, avail_height
             )
         }
-        let height = by - ty;
+        let height = by - ty + 1;
 
         let rect = Rect::new(x, y, width, height);
         canvas.fill_rect(rect).map_err(map_sdl_err)?;
