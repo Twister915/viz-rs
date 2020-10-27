@@ -141,7 +141,8 @@ fn create_data_src(file: &str) -> Result<(impl Framed<f64>, WavFile)> {
                 size,
                 SavitzkyGolayConfig {
                     window_size: 45,
-                    polynomial_order: 4,
+                    degree: 4,
+                    order: 0,
                 },
             )
             .into_channeled()
@@ -165,7 +166,8 @@ fn create_data_src(file: &str) -> Result<(impl Framed<f64>, WavFile)> {
                 size,
                 SavitzkyGolayConfig {
                     window_size: 5,
-                    polynomial_order: 2,
+                    degree: 2,
+                    order: 0,
                 },
             )
             .into_channeled()

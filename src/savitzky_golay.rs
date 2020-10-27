@@ -66,8 +66,12 @@ fn weights(m: i64, t: Fraction, n: Fraction, s: Fraction) -> Vec<Fraction> {
 
 #[derive(PartialEq, Eq, Debug, Copy, Clone, Hash)]
 pub struct SavitzkyGolayConfig {
+    // the number of coefficients to compute (the number of nearby points to convolve when computing any given point)
     pub window_size: u64,
-    pub polynomial_order: u64,
+    // what degree to use for the polynomials
+    pub degree: u64,
+    // what smoothed derivative to compute (0 means just smooth the data)
+    pub order: u64,
 }
 
 impl SavitzkyGolayConfig {
@@ -77,24 +81,19 @@ impl SavitzkyGolayConfig {
         }
 
         let half_window_size = (self.window_size as i64) / 2;
-        let start_time_delta = -half_window_size;
-        let end_time_delta = half_window_size;
-
-        let mut out = Vec::with_capacity(self.window_size as usize);
-        for delta in start_time_delta..=end_time_delta {
-            let weights = weights(
-                half_window_size,
-                delta.into(),
-                self.polynomial_order.into(),
-                0.into(),
-            );
-            out.push(TimeStepCoefficients {
-                time_offset: delta,
-                coefficients: weights,
+        let coefficients = (-half_window_size..=half_window_size)
+            .map(move |time_offset| TimeStepCoefficients {
+                coefficients: weights(
+                    half_window_size,
+                    time_offset.into(),
+                    self.degree.into(),
+                    self.order.into(),
+                ),
+                time_offset,
             })
-        }
+            .collect();
 
-        SavitzkyGolayCoefficients { coefficients: out }
+        SavitzkyGolayCoefficients { coefficients }
     }
 }
 
@@ -135,41 +134,20 @@ impl FramedMapper<f64, f64> for SavitzkyGolayMapper {
         let window_size = (half_window_size * 2) + 1;
 
         for idx in 0..n {
-            let (coefficients_idx, start, stop) = {
-                let def_coefficients_idx = half_window_size;
-                let neg_offset = idx - half_window_size;
-                if neg_offset < 0 {
-                    (def_coefficients_idx + neg_offset, 0, window_size)
-                } else {
-                    let until_end = (n - idx) - 1;
-                    if until_end < half_window_size {
-                        (
-                            def_coefficients_idx + (half_window_size - until_end),
-                            n - window_size,
-                            n,
-                        )
-                    } else {
-                        (
-                            def_coefficients_idx,
-                            idx - half_window_size,
-                            idx + half_window_size,
-                        )
-                    }
-                }
+            let (coefficients_idx, start, stop) = if idx <= half_window_size {
+                (idx, 0, window_size)
+            } else if idx <= (n - window_size) {
+                (half_window_size, idx - half_window_size, idx + half_window_size)
+            } else {
+                (window_size - (n - idx), n - window_size, n)
             };
 
-            let coefficients_idx = coefficients_idx as usize;
-            let start = start as usize;
-            let stop = stop as usize;
-            let mut ci = 0;
-            let mut sum = 0.0;
-            for i in start..stop {
-                let v = input[i];
-                let cf = coefficients[coefficients_idx].coefficients[ci];
-                sum += cf * v;
-                ci += 1;
-            }
-            self.buf.push(sum);
+            let coefficients = &coefficients[coefficients_idx as usize];
+            self.buf.push(((start as usize)..(stop as usize))
+                .enumerate()
+                .map(move |(ci, i)| (input[i], coefficients.coefficients[ci]))
+                .map(move |(v, cf)| cf * v)
+                .sum());
         }
 
         Ok(Some(&self.buf[..]))
