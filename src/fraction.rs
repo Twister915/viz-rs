@@ -170,16 +170,18 @@ impl Fraction {
         }
     }
 
-    pub fn simplify(self) -> Self {
+    pub fn simplify(mut self) -> Self {
         if self.simplified {
             self
         } else {
             let abs_numerator = self.numerator.abs();
             if self.denominator == 1 || abs_numerator < 2 {
+                self.simplified = true;
                 self
             } else {
                 let gcd = gcd(abs_numerator, self.denominator as i64);
                 if gcd == 1 {
+                    self.simplified = true;
                     self
                 } else {
                     Self {

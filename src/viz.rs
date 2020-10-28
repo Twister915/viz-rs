@@ -19,7 +19,7 @@ use sdl2::render::WindowCanvas;
 use std::ops::{Add, Sub};
 use std::time::{Duration, Instant};
 
-const FPS: u64 = 60;
+const FPS: u64 = 142;
 const DATA_WINDOW_MS: u64 = 60;
 
 pub fn visualize(file: &str) -> Result<()> {
