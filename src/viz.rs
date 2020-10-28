@@ -19,7 +19,12 @@ use sdl2::render::WindowCanvas;
 use std::ops::{Add, Sub};
 use std::time::{Duration, Instant};
 
-const FPS: u64 = 142;
+#[cfg(debug_assertions)]
+const FPS: u64 = 60;
+
+#[cfg(not(debug_assertions))]
+const FPS: u64 = 150;
+
 const DATA_WINDOW_MS: u64 = 60;
 
 pub fn visualize(file: &str) -> Result<()> {
@@ -153,7 +158,7 @@ fn create_data_src(file: &str) -> Result<(impl Framed<Flattened>, WavFile)> {
         .compose(move |frames| ExponentialSmoothing::new(frames, SEEK_BACK_LIMIT, ALPHA0))
         .lift(move |size| {
             SavitzkyGolayConfig {
-                window_size: 45,
+                window_size: 37,
                 degree: 4,
                 order: 0,
             }
