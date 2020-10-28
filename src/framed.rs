@@ -1,6 +1,6 @@
 use crate::channeled::Channeled;
 use crate::fraction::Fraction;
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use std::marker::PhantomData;
 use std::time::Duration;
 
@@ -174,7 +174,7 @@ macro_rules! delegate_impls {
 }
 
 pub trait FramedMapper<T, R> {
-    fn map(&mut self, input: &[T]) -> Result<Option<&[R]>>;
+    fn map<'a, 'b>(&'b mut self, input: &'a [T]) -> Result<Option<&'b [R]>>;
 
     fn map_frame_size(&self, orig: usize) -> usize {
         orig
@@ -203,10 +203,7 @@ where
     fn map(&mut self, input: &[T]) -> Result<Option<&[R]>> {
         self.buf.clear();
         let mapper = &self.mapper;
-        for elem in input {
-            self.buf.push(mapper(elem));
-        }
-
+        self.buf.extend(input.iter().map(mapper));
         Ok(Some(self.buf.as_slice()))
     }
 }
@@ -266,140 +263,94 @@ delegate_impls!(MappedFramed<S, M, T, R>, S, source);
 
 pub struct ChanneledMapperWrapper<M, T, R> {
     mapper: M,
-    in_bufs: ChanneledBufs<T>,
-    out_bufs: ChanneledBufs<R>,
-    out: Vec<Channeled<R>>,
+    zip_buf: Vec<Channeled<R>>,
+    out_bufs: Option<Channeled<Vec<R>>>,
+    in_bufs: Option<Channeled<Vec<T>>>,
+    in_size: usize,
+    out_size: usize,
 }
 
 impl<M, T, R> ChanneledMapperWrapper<M, T, R> {
     pub fn new(mapper: M, in_size: usize, out_size: usize) -> Self {
         Self {
             mapper,
-            in_bufs: ChanneledBufs::new(in_size),
-            out_bufs: ChanneledBufs::new(out_size),
-            out: Vec::with_capacity(out_size),
+            in_bufs: None,
+            out_bufs: None,
+            zip_buf: Vec::with_capacity(out_size),
+            in_size,
+            out_size,
         }
-    }
-}
-
-struct ChanneledBufs<T> {
-    primary: Vec<T>,
-    secondary: Option<Vec<T>>,
-    size: usize,
-}
-
-impl<T> ChanneledBufs<T> {
-    fn new(size: usize) -> Self {
-        Self {
-            primary: Vec::with_capacity(size),
-            secondary: None,
-            size,
-        }
-    }
-
-    fn clear(&mut self) {
-        self.primary.clear();
-        if let Some(secondary) = self.secondary.as_mut() {
-            secondary.clear();
-        }
-    }
-
-    fn primary(&mut self) -> &mut Vec<T> {
-        &mut self.primary
-    }
-
-    fn secondary(&mut self) -> &mut Vec<T> {
-        let secondary = &mut self.secondary;
-        if secondary.is_none() {
-            *secondary = Some(Vec::with_capacity(self.size));
-        }
-        secondary.as_mut().unwrap()
     }
 }
 
 impl<M, T, R> FramedMapper<Channeled<T>, Channeled<R>> for ChanneledMapperWrapper<M, T, R>
 where
     M: FramedMapper<T, R>,
-    T: Clone,
-    R: Clone,
+    T: Clone + Copy,
+    R: Clone + Copy,
 {
     fn map(&mut self, input: &[Channeled<T>]) -> Result<Option<&[Channeled<R>]>> {
-        use Channeled::*;
-
-        self.in_bufs.clear();
-        let mut is_mono = false;
-        let mut is_stereo = false;
-        for entry in input {
-            match entry {
-                Stereo(a, b) => {
-                    if is_mono {
-                        return Err(anyhow!("inconsistent mono/stereo data"));
-                    }
-
-                    is_stereo = true;
-                    self.in_bufs.primary().push(a.clone());
-                    self.in_bufs.secondary().push(b.clone());
-                }
-                Mono(v) => {
-                    if is_stereo {
-                        return Err(anyhow!("inconsistent mono/stereo data"));
-                    }
-
-                    is_mono = true;
-                    self.in_bufs.primary().push(v.clone());
-                }
-            }
-        }
-
-        self.out.clear();
-        self.out_bufs.clear();
-        if let Some(result) = self.mapper.map(self.in_bufs.primary.as_slice())? {
-            self.out_bufs.primary().extend_from_slice(result);
+        // initialize buffer for input lazily
+        let in_bufs = if let Some(in_bufs) = self.in_bufs.as_mut() {
+            in_bufs
         } else {
-            return Ok(None);
-        }
-
-        if is_stereo {
-            let secondary = self
-                .in_bufs
-                .secondary
-                .as_ref()
-                .expect("it's there")
-                .as_slice();
-            let count = if let Some(result) = self.mapper.map(secondary)? {
-                let a_count = self.out_bufs.primary.len();
-                let b_count = result.len();
-                if a_count != b_count {
-                    return Err(anyhow!(
-                        "left chan had {} outs but right had {} outs",
-                        a_count,
-                        b_count
-                    ));
-                }
-
-                self.out_bufs.secondary().extend_from_slice(result);
-                b_count
+            if let Some(i0) = input.get(0) {
+                let bufs = i0.as_ref().map(|_| Vec::with_capacity(self.in_size));
+                self.in_bufs = Some(bufs);
+                self.in_bufs.as_mut().unwrap()
             } else {
-                return Ok(None);
-            };
-
-            let primary = &mut self.out_bufs.primary;
-            let secondary = self.out_bufs.secondary.as_mut().unwrap();
-
-            for i in (0..count).rev() {
-                self.out
-                    .push(Stereo(primary.remove(i), secondary.remove(i)));
+                return Ok(Some(&[]));
             }
+        };
+
+        // clear the input buffers, and push the input data into them
+        in_bufs.as_mut_ref().for_each(move |buf| buf.clear());
+        input.iter().for_each(|iv| {
+            iv.zip(in_bufs.as_mut_ref())
+                .expect("mixed mono/stereo?")
+                .for_each(move |(iv, buf)| buf.push(iv))
+        });
+
+        let out_bufs = if let Some(out_bufs) = self.out_bufs.as_mut() {
+            out_bufs
         } else {
-            let primary = &mut self.out_bufs.primary;
-            let count = primary.len();
-            for i in (0..count).rev() {
-                self.out.push(Mono(primary.remove(i)));
-            }
-        }
+            let out_size = self.out_size;
+            let bufs = in_bufs.as_ref().map(|_| Vec::with_capacity(out_size));
+            self.out_bufs = Some(bufs);
+            self.out_bufs.as_mut().unwrap()
+        };
 
-        self.out.reverse();
-        Ok(Some(self.out.as_slice()))
+        let mapper = &mut self.mapper;
+        let zip_buf = &mut self.zip_buf;
+        // go through input data
+        in_bufs
+            .as_ref()
+            // zip with an out buf for each channel
+            .zip(out_bufs.as_mut_ref())
+            .expect("mix stereo/mono?")
+            // for each channel...
+            .try_map(|(in_buf, out_buf)| {
+                // map the data using the mapper, copy output to the out buf
+                // this returns Result<Option<()>> where it's Some(()) if mapper give a value
+                // and it's None if mapper did not give a value
+                mapper.map(in_buf).map(move |option| {
+                    option.map(move |out| {
+                        out_buf.clear();
+                        out_buf.extend_from_slice(out);
+                    })
+                })
+            })
+            .map(move |result| {
+                // flatten Channel<Option<()>> to Option<Channeled<()>>
+                result
+                    .flatten_option()
+                    // if the option is present, zip the output buffers, and return them
+                    .map(move |_| {
+                        zip_buf.clear();
+                        zip_buf.extend(out_bufs.as_ref().into_iter().copy_elements());
+                        zip_buf.as_slice()
+                    })
+            })
     }
 
     fn map_frame_size(&self, orig: usize) -> usize {

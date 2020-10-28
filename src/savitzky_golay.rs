@@ -68,10 +68,10 @@
 ///   but since we're multiplying and summing the data by these coefficients, and we don't want to
 ///   scale the input data at all, we must normalize each coefficient row so that it sums to 1.
 ///
-
 use crate::fraction::Fraction;
 use crate::framed::{ChanneledMapperWrapper, FramedMapper, MapperToChanneled};
 use anyhow::Result;
+use std::iter::{FusedIterator, TrustedLen};
 
 // thanks to: https://github.com/arntanguy/gram_savitzky_golay/tree/master/src
 // thanks to: https://github.com/mirkov/savitzky-golay/blob/master/gram-poly.lisp
@@ -157,12 +157,14 @@ impl SavitzkyGolayConfig {
 
         let half_window_size = (self.window_size as i64) / 2;
         (-half_window_size..=half_window_size)
-            .map(move |time_offset| weights(
-                half_window_size,
-                time_offset.into(),
-                self.degree.into(),
-                self.order.into(),
-            ))
+            .map(move |time_offset| {
+                weights(
+                    half_window_size,
+                    time_offset.into(),
+                    self.degree.into(),
+                    self.order.into(),
+                )
+            })
             .collect()
     }
 }
@@ -200,15 +202,19 @@ impl FramedMapper<f64, f64> for SavitzkyGolayMapper {
         self.buf.extend(
             SlidingWindow::new(coefficients.len(), input.len())
                 // grab the input data we need and the coefficient row we need
-                .map(move |win| (
-                    &input[win.start..win.end],
-                    &coefficients[(win.offset + (half_size as isize)) as usize],
-                ))
+                .map(move |win| {
+                    (
+                        &input[win.start..win.end],
+                        &coefficients[(win.offset + (half_size as isize)) as usize],
+                    )
+                })
                 // pointwise multiply the data, and get the sum
-                .map(move |(input, coefficients)|
+                .map(move |(input, coefficients)| {
                     Iterator::zip(input.iter().copied(), coefficients.iter().copied())
                         .map(move |(i, cf)| cf * i)
-                        .sum::<f64>()));
+                        .sum::<f64>()
+                }),
+        );
 
         Ok(Some(&self.buf[..]))
     }
@@ -287,21 +293,8 @@ impl Iterator for SlidingWindow {
     fn size_hint(&self) -> (usize, Option<usize>) {
         (self.size, Some(self.size))
     }
-
-    fn count(self) -> usize where
-        Self: Sized,
-    {
-        self.size
-    }
-
-    fn nth(&mut self, n: usize) -> Option<Self::Item> {
-        let amount_left = self.size - self.at;
-        if amount_left < n {
-            self.at = self.size;
-            None
-        } else {
-            self.at += n - 1;
-            self.next()
-        }
-    }
 }
+
+unsafe impl TrustedLen for SlidingWindow {}
+impl ExactSizeIterator for SlidingWindow {}
+impl FusedIterator for SlidingWindow {}

@@ -9,7 +9,6 @@ pub struct ExponentialSmoothing<S> {
     previous: Vec<Vec<Channeled<f64>>>,
     n_prev: usize,
     alpha: f64,
-    at: usize,
 }
 
 impl<S> ExponentialSmoothing<S>
@@ -24,7 +23,6 @@ where
             previous: Vec::with_capacity(seek_back_limit),
             n_prev: seek_back_limit,
             alpha,
-            at: 0,
         }
     }
 }
@@ -36,12 +34,6 @@ where
     fn seek_frame(&mut self, n: isize) -> Result<()> {
         if n == 0 {
             return Ok(());
-        }
-
-        let new_at = (self.at as isize) + n;
-        let max_at = self.num_full_frames();
-        if new_at < 0 || new_at >= (max_at as isize) {
-            return Err(anyhow!("cannot seek past bounds"));
         }
 
         if n < 0 {
@@ -63,19 +55,10 @@ where
             }
         }
 
-        let new_at = (self.at as isize) + n;
-        if new_at < 0 {
-            return Err(anyhow!("cannot seek to before start!"));
-        }
-        self.at = new_at as usize;
         Ok(())
     }
 
     fn next_frame(&mut self) -> Result<Option<&[Channeled<f64>]>> {
-        if self.at == self.num_frames() {
-            return Ok(None);
-        }
-
         let cap = self.source.full_frame_size();
         let next = if let Some(next) = self.source.next_frame()? {
             next
@@ -83,7 +66,7 @@ where
             return Ok(None);
         };
 
-        if self.at > 0 {
+        if !self.cur.is_empty() {
             // move cur to prev
             let mut new_prev = if self.previous.len() < self.n_prev {
                 Vec::with_capacity(cap)
@@ -93,47 +76,25 @@ where
                 tail
             };
 
-            new_prev.extend(self.cur.drain(..));
+            new_prev.extend_from_slice(self.cur.as_slice());
+            self.cur.clear();
             self.previous.insert(0, new_prev);
         }
 
-        use Channeled::*;
-        self.cur.extend_from_slice(next);
-        if self.at > 0 {
-            let alpha_inv = 1.0 - self.alpha;
-            for (idx, prev) in self
-                .previous
-                .get(0)
-                .expect("we should have prev if at > 0")
-                .iter()
-                .enumerate()
-            {
-                let cur = self.cur.get_mut(idx).expect("should have same len");
-                match cur {
-                    Stereo(ca, cb) => {
-                        if let Stereo(pa, pb) = prev {
-                            *ca = (*ca * alpha_inv) + (*pa * self.alpha);
-                            *cb = (*cb * alpha_inv) + (*pb * self.alpha);
-                        } else {
-                            return Err(anyhow!(
-                                "mismatch, expected stereo got mono for prev, mixed data!"
-                            ));
-                        }
-                    }
-                    Mono(cv) => {
-                        if let Mono(pv) = prev {
-                            *cv = (*cv * alpha_inv) + (*pv * self.alpha);
-                        } else {
-                            return Err(anyhow!(
-                                "mismatch, expected stereo got mono for prev, mixed data!"
-                            ));
-                        }
-                    }
-                }
-            }
+        if let Some(prev) = self.previous.get(0) {
+            let alpha = self.alpha;
+            let alpha_inv = 1.0 - alpha;
+
+            self.cur.extend(
+                next.iter()
+                    .zip(prev.iter().copied())
+                    .map(move |(new, pre)| new.zip(pre).expect("mono/stereo should match"))
+                    .map(move |zipped| zipped.map(move |(n, p)| (n * alpha_inv) + (p * alpha))),
+            );
+        } else {
+            self.cur.extend_from_slice(next);
         }
 
-        self.at += 1;
         Ok(Some(self.cur.as_slice()))
     }
 
@@ -142,7 +103,7 @@ where
     }
 
     fn num_frames_remain(&self) -> usize {
-        self.num_frames() - self.at
+        self.source.num_frames_remain()
     }
 
     fn num_full_frames(&self) -> usize {

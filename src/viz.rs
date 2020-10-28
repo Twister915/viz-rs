@@ -4,7 +4,7 @@ use crate::db::DbMapper;
 use crate::exponential_smoothing::ExponentialSmoothing;
 use crate::fft::FramedFft;
 use crate::fraction::Fraction;
-use crate::framed::{Framed, MapperToChanneled, Sampled, Samples, FramedMapper};
+use crate::framed::{Framed, FramedMapper, MapperToChanneled, Sampled, Samples};
 use crate::player::WavPlayer;
 use crate::savitzky_golay::SavitzkyGolayConfig;
 use crate::sliding::SlidingFrame;
@@ -19,7 +19,7 @@ use sdl2::render::WindowCanvas;
 use std::ops::{Add, Sub};
 use std::time::{Duration, Instant};
 
-const FPS: u64 = 142;
+const FPS: u64 = 60;
 const DATA_WINDOW_MS: u64 = 60;
 
 pub fn visualize(file: &str) -> Result<()> {
@@ -55,7 +55,10 @@ pub fn visualize(file: &str) -> Result<()> {
                     keycode: Some(Keycode::Escape),
                     ..
                 } => return Ok(()),
-                Event::KeyDown { keycode: Some(Keycode::Right), .. } => {
+                Event::KeyDown {
+                    keycode: Some(Keycode::Right),
+                    ..
+                } => {
                     let mut amount_seek = Duration::from_secs(10);
                     let frames_seek = amount_seek.div_duration_f64(frame_delta).floor() as u32;
                     amount_seek = frame_delta * frames_seek;
@@ -64,7 +67,10 @@ pub fn visualize(file: &str) -> Result<()> {
                     frames.seek_frame(frames_seek as isize)?;
                     last_frame_for_ts = Some(now.sub(frame_delta));
                 }
-                Event::KeyDown { keycode: Some(Keycode::Space), .. } => {
+                Event::KeyDown {
+                    keycode: Some(Keycode::Space),
+                    ..
+                } => {
                     if paused {
                         wav_player.play()?;
                     } else {
@@ -133,7 +139,7 @@ fn create_data_src(file: &str) -> Result<(impl Framed<Flattened>, WavFile)> {
     const BUF_SIZE: usize = 32768;
 
     let frame_src = WavFile::open(file, BUF_SIZE)?
-        .map(move |v| v.map(move |c| (*c).into()))
+        .map(move |v| v.map(move |c| c.into()))
         .compose(move |wav| {
             let frame_size = wav.samples_from_dur(Duration::from_millis(DATA_WINDOW_MS));
             let sample_rate = Fraction::new(wav.sample_rate() as i64, 1).unwrap();
@@ -150,7 +156,9 @@ fn create_data_src(file: &str) -> Result<(impl Framed<Flattened>, WavFile)> {
                 window_size: 45,
                 degree: 4,
                 order: 0,
-            }.into_mapper(size).into_channeled()
+            }
+            .into_mapper(size)
+            .into_channeled()
         })
         .compose(move |source| {
             let config = BinConfig {
@@ -164,16 +172,18 @@ fn create_data_src(file: &str) -> Result<(impl Framed<Flattened>, WavFile)> {
             source.apply_mapper(Binner::new(config).into_channeled())
         })
         .lift(move |size| DbMapper::new(size).into_channeled())
-        .map(move |d| d.map(move |v| normalize_between(*v, -45.0, -5.5)))
-        .map(move |d| d.map(move |v| normalize_infs(*v)))
+        .map(move |d| d.map(move |v| normalize_between(v, -45.0, -5.5)))
+        .map(move |d| d.map(move |v| normalize_infs(v)))
         .lift(move |size| {
             SavitzkyGolayConfig {
                 window_size: 5,
                 degree: 2,
                 order: 0,
-            }.into_mapper(size).into_channeled()
+            }
+            .into_mapper(size)
+            .into_channeled()
         })
-        .map(move |v| v.map(move |e| constrain_normalized(&e)))
+        .map(move |v| v.map(move |e| constrain_normalized(e)))
         .compose(move |frames| ExponentialSmoothing::new(frames, SEEK_BACK_LIMIT, ALPHA1))
         .lift(move |size| ChannelFlattener::new(size));
 
@@ -202,8 +212,7 @@ fn normalize_infs(v: f64) -> f64 {
     }
 }
 
-fn constrain_normalized(v: &f64) -> f64 {
-    let v = *v;
+fn constrain_normalized(v: f64) -> f64 {
     if v > 1.0 {
         1.0
     } else if v < 0.0 {
@@ -292,12 +301,18 @@ impl FramedMapper<Channeled<f64>, Flattened> for ChannelFlattener {
         for (idx, elem) in input.iter().enumerate() {
             let avg = match *elem {
                 Mono(v) => v,
-                Stereo(a, b) => (a + b) / 2.0
+                Stereo(a, b) => (a + b) / 2.0,
             };
 
             let max = match *elem {
                 Mono(v) => v,
-                Stereo(a, b) => if a > b { a } else { b },
+                Stereo(a, b) => {
+                    if a > b {
+                        a
+                    } else {
+                        b
+                    }
+                }
             };
 
             let high_water = if let Some(hw) = self.high_water.get_mut(idx) {

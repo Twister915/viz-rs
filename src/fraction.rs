@@ -196,15 +196,18 @@ impl Fraction {
         if self.denominator == other.denominator {
             (self, other)
         } else if self.numerator == 0 {
-            (Fraction{
-                numerator: 0,
-                denominator: other.denominator,
-                simplified: true,
-            }, Fraction {
-                numerator: other.numerator,
-                denominator: other.denominator,
-                simplified: other.simplified
-            })
+            (
+                Fraction {
+                    numerator: 0,
+                    denominator: other.denominator,
+                    simplified: true,
+                },
+                Fraction {
+                    numerator: other.numerator,
+                    denominator: other.denominator,
+                    simplified: other.simplified,
+                },
+            )
         } else if other.numerator == 0 {
             other.make_same_divisor(self)
         } else {
@@ -309,7 +312,8 @@ where
             numerator: a.numerator + b.numerator,
             denominator: a.denominator,
             simplified: false,
-        }.simplify()
+        }
+        .simplify()
     }
 }
 

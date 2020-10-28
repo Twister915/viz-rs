@@ -1,16 +1,24 @@
-use sdl2::audio::{AudioDevice, AudioSpecDesired, AudioCallback};
-use sdl2::AudioSubsystem;
-use anyhow::Result;
-use crate::wav::WavFile;
-use std::time::{Instant, Duration};
-use std::ops::{Sub, Add, Mul};
-use crate::framed::{Sampled, Samples};
 use crate::channeled::Channeled;
+use crate::framed::{Sampled, Samples};
+use crate::wav::WavFile;
+use anyhow::Result;
+use sdl2::audio::{AudioCallback, AudioDevice, AudioSpecDesired};
+use sdl2::AudioSubsystem;
+use std::ops::{Add, Mul, Sub};
+use std::time::{Duration, Instant};
 
 enum WavStates {
     Empty,
     Ready(WavPlayerInner),
-    Playing(AudioDevice<WavCallback>)
+    Playing(AudioDevice<WavCallback>),
+}
+
+impl WavStates {
+    fn take(&mut self) -> Self {
+        let mut next = Self::Empty;
+        std::mem::swap(&mut next, self);
+        next
+    }
 }
 
 pub struct WavPlayer {
@@ -32,22 +40,25 @@ impl WavPlayer {
     }
 
     pub fn play(&mut self) -> Result<()> {
-        let mut next_state = WavStates::Empty;
-        std::mem::swap(&mut self.state, &mut next_state);
-        match next_state {
-            WavStates::Empty => {
-                panic!("empty when can't be empty")
-            },
+        match self.state.take() {
+            WavStates::Empty => panic!("empty when can't be empty"),
             WavStates::Playing(playing) => {
                 self.state = WavStates::Playing(playing);
-            },
+            }
             WavStates::Ready(mut ready) => {
                 ready.start_playing_at = Some(Instant::now());
-                let dev = self.sdl_audio.open_playback(None, &AudioSpecDesired {
-                    freq: Some(ready.source.sample_rate as i32),
-                    channels: Some(ready.source.num_channels as u8),
-                    samples: None,
-                }, move |_| WavCallback { inner: ready }).map_err(map_sdl_err)?;
+                let dev = self
+                    .sdl_audio
+                    .open_playback(
+                        None,
+                        &AudioSpecDesired {
+                            freq: Some(ready.source.sample_rate as i32),
+                            channels: Some(ready.source.num_channels as u8),
+                            samples: None,
+                        },
+                        move |_| WavCallback { inner: ready },
+                    )
+                    .map_err(map_sdl_err)?;
                 dev.resume();
                 self.state = WavStates::Playing(dev);
             }
@@ -56,19 +67,16 @@ impl WavPlayer {
     }
 
     pub fn stop(&mut self) -> Result<()> {
-        let mut next_state = WavStates::Empty;
-        std::mem::swap(&mut self.state, &mut next_state);
-        match next_state {
-            WavStates::Empty => {
-                panic!("empty when can't be empty")
-            },
+        match self.state.take() {
+            WavStates::Empty => panic!("empty when can't be empty"),
             WavStates::Ready(ready) => {
                 self.state = WavStates::Ready(ready);
-            },
+            }
             WavStates::Playing(playing) => {
                 playing.pause();
                 let mut inner = playing.close_and_get_callback().inner;
-                inner.at += Instant::now().sub(inner.start_playing_at.take().expect("should exist"));
+                inner.at +=
+                    Instant::now().sub(inner.start_playing_at.take().expect("should exist"));
                 self.state = WavStates::Ready(inner);
             }
         }
@@ -82,7 +90,9 @@ impl WavPlayer {
         if let WavStates::Ready(player) = &mut self.state {
             let amount = seek_to.sub(Instant::now());
             let skip_samples = player.source.samples_from_dur(amount);
-            let skip_time = Duration::from_nanos(1_000_000_000 / (player.source.sample_rate as u64)).mul(skip_samples as u32);
+            let skip_time =
+                Duration::from_nanos(1_000_000_000 / (player.source.sample_rate as u64))
+                    .mul(skip_samples as u32);
             player.source.seek_samples(skip_samples as isize)?;
             player.at += skip_time;
             player.file_at += skip_time;
@@ -102,7 +112,7 @@ struct WavPlayerInner {
 }
 
 struct WavCallback {
-    inner: WavPlayerInner
+    inner: WavPlayerInner,
 }
 
 impl AudioCallback for WavCallback {
@@ -130,8 +140,10 @@ impl AudioCallback for WavCallback {
 
             idx += 1;
             if idx == data.len() {
-                self.inner.file_at += Duration::from_nanos(1_000_000_000 / (self.inner.source.sample_rate as u64)).mul(idx as u32);
-                return
+                self.inner.file_at +=
+                    Duration::from_nanos(1_000_000_000 / (self.inner.source.sample_rate as u64))
+                        .mul(idx as u32);
+                return;
             }
         }
     }

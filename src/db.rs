@@ -18,10 +18,8 @@ impl DbMapper {
 impl FramedMapper<f64, f64> for DbMapper {
     fn map(&mut self, input: &[f64]) -> Result<Option<&[f64]>> {
         self.buf.clear();
-        for elem in input {
-            self.buf.push(20.0 * (*elem).log10());
-        }
-
+        self.buf
+            .extend(input.iter().copied().map(move |v| 20.0 * v.log10()));
         Ok(Some(self.buf.as_slice()))
     }
 }

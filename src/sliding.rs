@@ -1,5 +1,6 @@
 use crate::delegate_impls;
 use crate::framed::{Framed, Samples};
+use crate::util::try_use_iter;
 use anyhow::Result;
 
 pub struct SlidingFrame<S, T> {
@@ -95,14 +96,21 @@ where
     S: Samples<T>,
 {
     fn ensure_buf_filled(&mut self) -> Result<()> {
-        while self.buf.len() < self.size {
-            if let Some(sample) = self.source.next_sample()? {
-                self.buf.push(sample);
-            } else {
-                break;
-            }
+        let source = &mut self.source;
+        let buf = &mut self.buf;
+        let n_load = std::cmp::min(source.num_samples_remain(), self.size - buf.len());
+        if n_load == 0 {
+            return Ok(());
         }
 
-        Ok(())
+        try_use_iter(
+            std::iter::repeat_with(|| source.next_sample()).take(n_load),
+            move |iter| {
+                buf.extend(
+                    iter.take_while(move |v| v.is_some())
+                        .map(move |v| v.unwrap()),
+                )
+            },
+        )
     }
 }

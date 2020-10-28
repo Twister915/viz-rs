@@ -28,10 +28,13 @@ impl Binner {
     }
 
     fn aggregate_bufs(&mut self) {
+        let in_size = self.in_size as f64;
         self.out_buf.clear();
-        for elem in self.bufs.iter_mut() {
-            self.out_buf.push(elem.drain(..).sum::<f64>() / (self.in_size as f64));
-        }
+        self.out_buf.extend(
+            self.bufs
+                .iter_mut()
+                .map(|elem| elem.drain(..).sum::<f64>() / in_size),
+        );
     }
 }
 

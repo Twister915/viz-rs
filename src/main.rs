@@ -1,4 +1,5 @@
 #![feature(div_duration)]
+#![feature(trusted_len)]
 
 use crate::viz::visualize;
 
@@ -9,13 +10,13 @@ mod exponential_smoothing;
 mod fft;
 mod fraction;
 mod framed;
+mod player;
 mod savitzky_golay;
 mod sliding;
 mod util;
 mod viz;
 mod wav;
 mod window;
-mod player;
 
 fn main() {
     if let Some(target) = std::env::args().nth(1) {

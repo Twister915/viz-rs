@@ -51,9 +51,15 @@ pub struct MemoizedWindowingMapper {
 impl FramedMapper<f64, f64> for MemoizedWindowingMapper {
     fn map(&mut self, input: &[f64]) -> Result<Option<&[f64]>> {
         self.buf.clear();
-        for (idx, v) in input.iter().enumerate() {
-            self.buf.push(self.coefficients[idx] * *v);
-        }
+
+        self.buf.extend(
+            input
+                .iter()
+                .copied()
+                .zip(self.coefficients.iter().copied())
+                .map(move |(v, cf)| cf * v),
+        );
+
         Ok(Some(self.buf.as_slice()))
     }
 }
