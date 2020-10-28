@@ -15,6 +15,7 @@ mod util;
 mod viz;
 mod wav;
 mod window;
+mod player;
 
 fn main() {
     if let Some(target) = std::env::args().nth(1) {

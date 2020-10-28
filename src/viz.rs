@@ -4,23 +4,23 @@ use crate::db::DbMapper;
 use crate::exponential_smoothing::ExponentialSmoothing;
 use crate::fft::FramedFft;
 use crate::fraction::Fraction;
-use crate::framed::{Framed, MapperToChanneled, Sampled, Samples};
-use crate::savitzky_golay::{SavitzkyGolayConfig, SavitzkyGolayMapper};
+use crate::framed::{Framed, MapperToChanneled, Sampled, Samples, FramedMapper};
+use crate::player::WavPlayer;
+use crate::savitzky_golay::SavitzkyGolayConfig;
 use crate::sliding::SlidingFrame;
 use crate::wav::WavFile;
 use crate::window::{BlackmanNuttall, WindowingFunction};
 use anyhow::Result;
-use sdl2::audio::{AudioCallback, AudioSpecDesired};
 use sdl2::event::Event;
 use sdl2::keyboard::Keycode;
 use sdl2::pixels::Color;
 use sdl2::rect::Rect;
 use sdl2::render::WindowCanvas;
-use std::ops::Add;
+use std::ops::{Add, Sub};
 use std::time::{Duration, Instant};
 
 const FPS: u64 = 142;
-const DATA_WINDOW_MS: u64 = 70;
+const DATA_WINDOW_MS: u64 = 60;
 
 pub fn visualize(file: &str) -> Result<()> {
     let sdl_context = sdl2::init().map_err(map_sdl_err)?;
@@ -35,29 +35,19 @@ pub fn visualize(file: &str) -> Result<()> {
     canvas.present();
 
     let (mut frames, wav_src) = create_data_src(file)?;
-
-    let audio_player = sdl_context
-        .audio()
-        .map_err(map_sdl_err)?
-        .open_playback(
-            None,
-            &AudioSpecDesired {
-                freq: Some(wav_src.sample_rate as i32),
-                samples: None,
-                channels: Some(wav_src.num_channels as u8),
-            },
-            move |_| WavPlayer { source: wav_src },
-        )
-        .map_err(map_sdl_err)?;
+    let mut wav_player = WavPlayer::new(sdl_context.audio().map_err(map_sdl_err)?, wav_src);
 
     let mut event_pump = sdl_context.event_pump().map_err(map_sdl_err)?;
 
-    audio_player.resume();
+    wav_player.play()?;
+    let mut paused = false;
     let mut last_frame_for_ts: Option<Instant> = None;
     let frame_delta = Duration::new(0, (1_000_000_000u64 / FPS) as u32);
     let frame_for_offset = Duration::from_millis(DATA_WINDOW_MS / 2);
     // frame_for_offset += frame_delta.mul_f64(alpha_frame_offset());
     loop {
+        let now = Instant::now();
+
         for event in event_pump.poll_iter() {
             match event {
                 Event::Quit { .. }
@@ -65,10 +55,27 @@ pub fn visualize(file: &str) -> Result<()> {
                     keycode: Some(Keycode::Escape),
                     ..
                 } => return Ok(()),
+                Event::KeyDown { keycode: Some(Keycode::Right), .. } => {
+                    let mut amount_seek = Duration::from_secs(10);
+                    let frames_seek = amount_seek.div_duration_f64(frame_delta).floor() as u32;
+                    amount_seek = frame_delta * frames_seek;
+
+                    wav_player.seek(amount_seek)?;
+                    frames.seek_frame(frames_seek as isize)?;
+                    last_frame_for_ts = Some(now.sub(frame_delta));
+                }
+                Event::KeyDown { keycode: Some(Keycode::Space), .. } => {
+                    if paused {
+                        wav_player.play()?;
+                    } else {
+                        wav_player.stop()?;
+                    }
+
+                    paused = !paused;
+                }
                 _ => {}
             }
         }
-        let now = Instant::now();
         if let Some(last_frame_for) = &last_frame_for_ts {
             let cur_frame_for = last_frame_for.add(frame_delta);
             let cur_audio_at = now;
@@ -100,14 +107,16 @@ pub fn visualize(file: &str) -> Result<()> {
             if status > 0 {
                 std::thread::sleep(frame_delta);
             } else {
-                if let Some(frame) = frames.next_frame()? {
-                    last_frame_for_ts = Some(cur_frame_for);
-                    if status == 0 {
-                        draw_frame(&mut canvas, frame)?;
+                last_frame_for_ts = Some(cur_frame_for);
+                if !paused {
+                    if let Some(frame) = frames.next_frame()? {
+                        if status == 0 {
+                            draw_frame(&mut canvas, frame)?;
+                        }
+                    } else {
+                        wav_player.stop()?;
+                        return Ok(());
                     }
-                } else {
-                    audio_player.pause();
-                    return Ok(());
                 }
             }
         } else {
@@ -116,10 +125,10 @@ pub fn visualize(file: &str) -> Result<()> {
     }
 }
 
-const ALPHA0: f64 = 0.85;
-const ALPHA1: f64 = 0.55;
+const ALPHA0: f64 = 0.75;
+const ALPHA1: f64 = 0.48;
 
-fn create_data_src(file: &str) -> Result<(impl Framed<f64>, WavFile)> {
+fn create_data_src(file: &str) -> Result<(impl Framed<Flattened>, WavFile)> {
     const SEEK_BACK_LIMIT: usize = 1;
     const BUF_SIZE: usize = 32768;
 
@@ -137,15 +146,11 @@ fn create_data_src(file: &str) -> Result<(impl Framed<f64>, WavFile)> {
         .try_lift(move |size| FramedFft::new(size))?
         .compose(move |frames| ExponentialSmoothing::new(frames, SEEK_BACK_LIMIT, ALPHA0))
         .lift(move |size| {
-            SavitzkyGolayMapper::new(
-                size,
-                SavitzkyGolayConfig {
-                    window_size: 45,
-                    degree: 4,
-                    order: 0,
-                },
-            )
-            .into_channeled()
+            SavitzkyGolayConfig {
+                window_size: 45,
+                degree: 4,
+                order: 0,
+            }.into_mapper(size).into_channeled()
         })
         .compose(move |source| {
             let config = BinConfig {
@@ -159,32 +164,20 @@ fn create_data_src(file: &str) -> Result<(impl Framed<f64>, WavFile)> {
             source.apply_mapper(Binner::new(config).into_channeled())
         })
         .lift(move |size| DbMapper::new(size).into_channeled())
-        .map(move |d| d.map(move |v| normalize_between(*v, 29.0, 56.0)))
+        .map(move |d| d.map(move |v| normalize_between(*v, -45.0, -5.5)))
         .map(move |d| d.map(move |v| normalize_infs(*v)))
         .lift(move |size| {
-            SavitzkyGolayMapper::new(
-                size,
-                SavitzkyGolayConfig {
-                    window_size: 5,
-                    degree: 2,
-                    order: 0,
-                },
-            )
-            .into_channeled()
+            SavitzkyGolayConfig {
+                window_size: 5,
+                degree: 2,
+                order: 0,
+            }.into_mapper(size).into_channeled()
         })
         .map(move |v| v.map(move |e| constrain_normalized(&e)))
         .compose(move |frames| ExponentialSmoothing::new(frames, SEEK_BACK_LIMIT, ALPHA1))
-        .map(channel_avg);
+        .lift(move |size| ChannelFlattener::new(size));
 
     Ok((frame_src, WavFile::open(file, BUF_SIZE)?))
-}
-
-fn channel_avg(v: &Channeled<f64>) -> f64 {
-    use Channeled::*;
-    match v {
-        Stereo(a, b) => (*a + *b) / 2.0,
-        Mono(v) => *v,
-    }
 }
 
 fn normalize_between(v: f64, min: f64, max: f64) -> f64 {
@@ -220,7 +213,7 @@ fn constrain_normalized(v: &f64) -> f64 {
     }
 }
 
-fn draw_frame(canvas: &mut WindowCanvas, frame: &[f64]) -> Result<()> {
+fn draw_frame(canvas: &mut WindowCanvas, frame: &[Flattened]) -> Result<()> {
     const BIN_MARGIN: u32 = 3;
 
     canvas.set_draw_color(Color::BLACK);
@@ -238,7 +231,8 @@ fn draw_frame(canvas: &mut WindowCanvas, frame: &[f64]) -> Result<()> {
         let rx = lx + width_per_bin;
         cur_x = rx + BIN_MARGIN;
 
-        let v = frame[i as usize];
+        let flattened = frame[i as usize];
+        let v = flattened.avg;
         let mut ty = ((1.0 - v) * (avail_height as f64)) as u32;
         const MIN_HEIGHT: u32 = 4;
         if ty < MIN_HEIGHT {
@@ -270,37 +264,59 @@ fn map_sdl_err(err: String) -> anyhow::Error {
     anyhow::anyhow!("sdl2: {}", err)
 }
 
-struct WavPlayer {
-    source: WavFile,
+struct ChannelFlattener {
+    high_water: Vec<f64>,
+    buf: Vec<Flattened>,
 }
 
-impl AudioCallback for WavPlayer {
-    type Channel = f32;
-
-    fn callback(&mut self, data: &mut [f32]) {
-        let mut idx = 0;
-        while let Some(sample) = self.source.next_sample().expect("no err") {
-            match sample {
-                Channeled::Mono(v) => {
-                    let v: f64 = v.into();
-                    let v = v as f32;
-                    data[idx] = v;
-                }
-                Channeled::Stereo(l, r) => {
-                    let l: f64 = l.into();
-                    let r: f64 = r.into();
-                    let l = l as f32;
-                    let r = r as f32;
-                    data[idx] = l;
-                    idx += 1;
-                    data[idx] = r;
-                }
-            }
-
-            idx += 1;
-            if idx == data.len() {
-                return;
-            }
+impl ChannelFlattener {
+    fn new(size: usize) -> Self {
+        Self {
+            high_water: Vec::with_capacity(size),
+            buf: Vec::with_capacity(size),
         }
+    }
+}
+
+#[derive(PartialEq, Clone, Copy, Debug)]
+struct Flattened {
+    pub high_water: f64,
+    pub high_channel: f64,
+    pub avg: f64,
+}
+
+impl FramedMapper<Channeled<f64>, Flattened> for ChannelFlattener {
+    fn map(&mut self, input: &[Channeled<f64>]) -> Result<Option<&[Flattened]>> {
+        use Channeled::*;
+        self.buf.clear();
+        for (idx, elem) in input.iter().enumerate() {
+            let avg = match *elem {
+                Mono(v) => v,
+                Stereo(a, b) => (a + b) / 2.0
+            };
+
+            let max = match *elem {
+                Mono(v) => v,
+                Stereo(a, b) => if a > b { a } else { b },
+            };
+
+            let high_water = if let Some(hw) = self.high_water.get_mut(idx) {
+                if *hw < max {
+                    *hw = max;
+                }
+                *hw
+            } else {
+                self.high_water.push(max);
+                max
+            };
+
+            self.buf.push(Flattened {
+                high_water,
+                high_channel: max,
+                avg,
+            });
+        }
+
+        Ok(Some(&self.buf[..]))
     }
 }

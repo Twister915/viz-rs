@@ -30,7 +30,7 @@ impl Binner {
     fn aggregate_bufs(&mut self) {
         self.out_buf.clear();
         for elem in self.bufs.iter_mut() {
-            self.out_buf.push(elem.drain(..).sum());
+            self.out_buf.push(elem.drain(..).sum::<f64>() / (self.in_size as f64));
         }
     }
 }
@@ -151,11 +151,8 @@ fn compute_bin_indexes(config: &BinConfig) -> Vec<usize> {
         if let Some(v) = elem {
             fin_out.push(v);
             has_any = true;
-        } else {
-            // skip this bin if it's before the 1st bin
-            if has_any {
-                panic!("did not discover good range for bin {}", idx)
-            }
+        } else if has_any {
+            panic!("did not discover good range for bin {}", idx)
         }
     }
 

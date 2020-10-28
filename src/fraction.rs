@@ -149,14 +149,14 @@ impl Fraction {
             Self {
                 numerator: 0,
                 denominator: 1,
-                simplified: false,
+                simplified: true,
             }
         } else {
             let numerator_sign = self.numerator.signum();
             Self {
                 numerator: (self.denominator as i64) * numerator_sign,
                 denominator: (self.numerator.abs()) as u64,
-                simplified: false,
+                simplified: self.simplified,
             }
             .simplify()
         }
@@ -305,14 +305,11 @@ where
     fn add(self, rhs: T) -> Self::Output {
         let rhs = rhs.into();
         let (a, b) = self.make_same_divisor(rhs);
-        let out = Self {
+        Self {
             numerator: a.numerator + b.numerator,
             denominator: a.denominator,
             simplified: false,
-        }
-        .simplify();
-        // println!("{} + {} = {}", a, b, out);
-        out
+        }.simplify()
     }
 }
 
@@ -348,10 +345,41 @@ impl Into<Fraction> for u32 {
     }
 }
 
+impl Into<Fraction> for i16 {
+    fn into(self) -> Fraction {
+        (self as i64).into()
+    }
+}
+
+impl Into<Fraction> for u16 {
+    fn into(self) -> Fraction {
+        (self as u64).into()
+    }
+}
+
+impl Into<Fraction> for i8 {
+    fn into(self) -> Fraction {
+        (self as i64).into()
+    }
+}
+
+impl Into<Fraction> for u8 {
+    fn into(self) -> Fraction {
+        (self as u64).into()
+    }
+}
+
 impl Into<f64> for Fraction {
     fn into(self) -> f64 {
         let s = self.simplify();
         (s.numerator as f64) / (s.denominator as f64)
+    }
+}
+
+impl Into<f32> for Fraction {
+    fn into(self) -> f32 {
+        let s = self.simplify();
+        (s.numerator as f32) / (s.denominator as f32)
     }
 }
 
