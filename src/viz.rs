@@ -136,8 +136,8 @@ pub fn visualize(file: &str) -> Result<()> {
     }
 }
 
-const ALPHA0: f64 = 0.75;
-const ALPHA1: f64 = 0.48;
+const ALPHA0: f64 = 0.80;
+const ALPHA1: f64 = 0.60;
 
 fn create_data_src(file: &str) -> Result<(impl Framed<Flattened>, WavFile)> {
     const SEEK_BACK_LIMIT: usize = 1;
@@ -158,8 +158,8 @@ fn create_data_src(file: &str) -> Result<(impl Framed<Flattened>, WavFile)> {
         .compose(move |frames| ExponentialSmoothing::new(frames, SEEK_BACK_LIMIT, ALPHA0))
         .lift(move |size| {
             SavitzkyGolayConfig {
-                window_size: 37,
-                degree: 4,
+                window_size: 27,
+                degree: 7,
                 order: 0,
             }
             .into_mapper(size)
@@ -169,7 +169,7 @@ fn create_data_src(file: &str) -> Result<(impl Framed<Flattened>, WavFile)> {
             let config = BinConfig {
                 bins: 48,
                 fmin: 42.0,
-                fmax: 14000.0,
+                fmax: 6000.0,
                 gamma: 2.3,
                 input_size: source.full_frame_size(),
                 sample_rate: source.sample_rate(),
@@ -177,11 +177,11 @@ fn create_data_src(file: &str) -> Result<(impl Framed<Flattened>, WavFile)> {
             source.apply_mapper(Binner::new(config).into_channeled())
         })
         .lift(move |size| DbMapper::new(size).into_channeled())
-        .map(move |d| d.map(move |v| normalize_between(v, -45.0, -5.5)))
+        .map(move |d| d.map(move |v| normalize_between(v, -35.0, -8.5)))
         .map(move |d| d.map(move |v| normalize_infs(v)))
         .lift(move |size| {
             SavitzkyGolayConfig {
-                window_size: 5,
+                window_size: 7,
                 degree: 2,
                 order: 0,
             }
