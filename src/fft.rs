@@ -1,6 +1,6 @@
 use crate::channeled::Channeled;
 use crate::framed::FramedMapper;
-use crate::util::log_timed;
+use crate::util::{log_timed, slice_copy_from};
 use anyhow::{anyhow, Result};
 use fftw::array::AlignedVec;
 use fftw::plan::{R2CPlan, R2CPlan64};
@@ -9,7 +9,6 @@ use fftw::types::{c64, Flag};
 pub struct FramedFft {
     plan: R2CPlan64,
     bufs: Option<Channeled<Bufs>>,
-    out: Vec<Channeled<f64>>,
     n_out: usize,
     n_in: usize,
 }
@@ -40,7 +39,6 @@ impl FramedFft {
         Ok(Self {
             plan,
             bufs: None,
-            out: Vec::with_capacity(n_out),
             n_out,
             n_in: cap,
         })
@@ -48,7 +46,10 @@ impl FramedFft {
 }
 
 impl FramedMapper<Channeled<f64>, Channeled<f64>> for FramedFft {
-    fn map(&mut self, input: &[Channeled<f64>]) -> Result<Option<&[Channeled<f64>]>> {
+    fn map<'a>(
+        &'a mut self,
+        input: &'a mut [Channeled<f64>],
+    ) -> Result<Option<&'a mut [Channeled<f64>]>> {
         // lazily setup the bufs
         let bufs = if let Some(buf) = self.bufs.as_mut() {
             buf
@@ -82,21 +83,25 @@ impl FramedMapper<Channeled<f64>, Channeled<f64>> for FramedFft {
             });
 
         let plan = &mut self.plan;
-        self.out.clear();
-        self.out.extend(bufs.as_mut_ref().try_map(move |buf| {
-            // transform input data in buf: &mut Bufs
-            // input is in buf.input
-            // output (complex) will be in buf.output
-            let i = buf.input.as_slice_mut();
-            let o = buf.output.as_slice_mut();
-            plan.r2c(i, o).map_err(map_fftw_error)?;
 
-            // return an iterator over the output which skips the DC component (skip(1)) and
-            // converts complex data to real data using norm() (magnitude of complex number)
-            Ok(o.iter().skip(1).map(move |v| v.norm()))
-        })?);
+        let updated = slice_copy_from(
+            input,
+            bufs.as_mut_ref()
+                .try_map(move |buf| {
+                    // transform input data in buf: &mut Bufs
+                    // input is in buf.input
+                    // output (complex) will be in buf.output
+                    let i = buf.input.as_slice_mut();
+                    let o = buf.output.as_slice_mut();
+                    plan.r2c(i, o).map_err(map_fftw_error)?;
 
-        Ok(Some(&self.out))
+                    // return an iterator over the output which skips the DC component (skip(1)) and
+                    // converts complex data to real data using norm() (magnitude of complex number)
+                    Ok(o.iter().skip(1).map(move |v| v.norm()))
+                })?
+                .into_iter(),
+        );
+        Ok(Some(updated))
     }
 
     fn map_frame_size(&self, _: usize) -> usize {

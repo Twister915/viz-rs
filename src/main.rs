@@ -1,11 +1,11 @@
 #![feature(div_duration)]
 #![feature(trusted_len)]
+#![feature(associated_type_defaults)]
 
 use crate::viz::visualize;
 
 mod binner;
 mod channeled;
-mod db;
 mod exponential_smoothing;
 mod fft;
 mod fraction;
@@ -18,7 +18,6 @@ mod viz;
 mod wav;
 mod window;
 mod timer;
-mod ring;
 
 fn main() {
     if let Some(target) = std::env::args().nth(1) {

@@ -193,35 +193,41 @@ impl SavitzkyGolayMapper {
 }
 
 impl FramedMapper<f64, f64> for SavitzkyGolayMapper {
-    fn map(&mut self, input: &[f64]) -> Result<Option<&[f64]>> {
+    fn map<'a>(&'a mut self, input: &'a mut [f64]) -> Result<Option<&'a mut [f64]>> {
         let coefficients = self.coefficients.as_slice();
         let half_size = coefficients.len() / 2;
 
-        self.buf.clear();
+        if self.buf.len() == input.len() {
+            self.buf.copy_from_slice(input)
+        } else {
+            self.buf.clear();
+            self.buf.extend_from_slice(input);
+        }
+
         // convolution!
         // slides a window of fixed size along the input data
         //
         // each window has a point of interest which is at some offset from center of window
         // input data for each window is window.start..window.end and point of interest is at
         // window.start + window.offset + half_size
-        self.buf.extend(
-            SlidingWindow::new(coefficients.len(), input.len())
-                // grab the input data we need and the coefficient row we need
-                .map(move |win| {
-                    (
-                        &input[win.start..win.end],
-                        &coefficients[(win.offset + (half_size as isize)) as usize],
-                    )
-                })
-                // pointwise multiply the data, and get the sum
-                .map(move |(input, coefficients)| {
-                    Iterator::zip(input.iter().copied(), coefficients.iter().copied())
-                        .map(move |(i, cf)| cf * i)
-                        .sum::<f64>()
-                }),
-        );
+        SlidingWindow::new(coefficients.len(), input.len())
+            .map(|win| {
+                (
+                    &self.buf[win.start..win.end],
+                    &coefficients[(win.offset + (half_size as isize)) as usize],
+                )
+            })
+            .zip(input.iter_mut())
+            .for_each(move |((data, coefficients), v)| {
+                *v = data
+                    .iter()
+                    .copied()
+                    .zip(coefficients.iter().copied())
+                    .map(move |(i, cf)| cf * i)
+                    .sum()
+            });
 
-        Ok(Some(&self.buf[..]))
+        Ok(Some(input))
     }
 }
 

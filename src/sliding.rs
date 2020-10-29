@@ -6,6 +6,7 @@ use anyhow::Result;
 pub struct SlidingFrame<S, T> {
     source: S,
     buf: Vec<T>,
+    cur_buf: Vec<T>,
     size: usize,
     stride: usize,
 }
@@ -21,6 +22,7 @@ where
         Self {
             source,
             buf: Vec::with_capacity(size),
+            cur_buf: Vec::with_capacity(size),
             size,
             stride,
         }
@@ -30,6 +32,7 @@ where
 impl<S, T> Framed<T> for SlidingFrame<S, T>
 where
     S: Samples<T>,
+    T: Copy,
 {
     fn seek_frame(&mut self, n: isize) -> Result<()> {
         if n < 0 {
@@ -47,7 +50,7 @@ where
         Ok(())
     }
 
-    fn next_frame(&mut self) -> Result<Option<&[T]>> {
+    fn next_frame(&mut self) -> Result<Option<&mut [T]>> {
         if !self.buf.is_empty() {
             if self.buf.len() < self.stride {
                 self.buf.clear();
@@ -63,7 +66,9 @@ where
             return Ok(None);
         }
 
-        Ok(Some(self.buf.as_slice()))
+        self.cur_buf.clear();
+        self.cur_buf.extend_from_slice(self.buf.as_slice());
+        Ok(Some(self.cur_buf.as_mut_slice()))
     }
 
     fn num_frames(&self) -> usize {
@@ -94,6 +99,7 @@ delegate_impls!(SlidingFrame<S, T>, S, source);
 impl<S, T> SlidingFrame<S, T>
 where
     S: Samples<T>,
+    T: Copy,
 {
     fn ensure_buf_filled(&mut self) -> Result<()> {
         let source = &mut self.source;

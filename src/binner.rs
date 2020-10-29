@@ -1,10 +1,8 @@
 use crate::framed::{ChanneledMapperWrapper, FramedMapper, MapperToChanneled};
-use crate::util::{log_timed, two_dimensional_vec};
+use crate::util::log_timed;
 use anyhow::Result;
 
 pub struct Binner {
-    bufs: Vec<Vec<f64>>,
-    out_buf: Vec<f64>,
     indexes: Vec<usize>,
     n_bins: usize,
     in_size: usize,
@@ -15,41 +13,27 @@ impl Binner {
         log_timed(format!("compute bin constants for {:?}", &config), || {
             let indexes = compute_bin_indexes(&config, config.bins);
             let n_bins = indexes.len() - 1;
-            let sizes = compute_bin_sizes(&indexes);
-            let bufs = two_dimensional_vec(&sizes);
-            let out_buf = Vec::with_capacity(n_bins);
             let in_size = config.input_size;
             Self {
-                bufs,
-                out_buf,
                 indexes,
                 n_bins,
                 in_size,
             }
         })
     }
-
-    fn aggregate_bufs(&mut self) {
-        let in_size = self.in_size as f64;
-        self.out_buf.clear();
-        self.out_buf.extend(
-            self.bufs
-                .iter_mut()
-                .map(|elem| elem.drain(..).sum::<f64>() / in_size),
-        );
-    }
 }
 
 impl FramedMapper<f64, f64> for Binner {
-    fn map(&mut self, input: &[f64]) -> Result<Option<&[f64]>> {
+    fn map<'a>(&'a mut self, input: &'a mut [f64]) -> Result<Option<&'a mut [f64]>> {
         if input.len() != self.in_size {
             return Ok(None);
         }
 
         let mut bin_idx = 0usize;
-        let bufs = self.bufs.as_mut_slice();
         let idx_slice = self.indexes.as_slice();
-        for (idx, elem) in input.iter().enumerate() {
+        let mut zeroed_bin_idx = 0;
+        for idx in 0..self.in_size {
+            let elem = input[idx];
             let this_bin_start_at = &idx_slice[bin_idx];
             if idx < *this_bin_start_at {
                 continue;
@@ -64,14 +48,24 @@ impl FramedMapper<f64, f64> for Binner {
                 break;
             }
 
-            let elem = *elem;
             if elem.is_finite() {
-                bufs[bin_idx].push(elem);
+                // can we use bin_idx in input slice?
+                if bin_idx > idx {
+                    panic!("can't use bin_idx in input slice {} is bin but idx avail is {}", bin_idx, idx)
+                }
+
+                while zeroed_bin_idx <= bin_idx {
+                    input[zeroed_bin_idx] = 0.0;
+                    zeroed_bin_idx += 1;
+                }
+
+                input[bin_idx] += elem;
             }
         }
 
-        self.aggregate_bufs();
-        Ok(Some(self.out_buf.as_slice()))
+        let in_size = self.in_size as f64;
+        input.iter_mut().for_each(move |e| *e /= in_size);
+        Ok(Some(&mut input[..bin_idx]))
     }
 
     fn map_frame_size(&self, _: usize) -> usize {
@@ -95,14 +89,6 @@ pub struct BinConfig {
     pub fmin: f64,
     pub fmax: f64,
     pub gamma: f64,
-}
-
-fn compute_bin_sizes(indexes: &Vec<usize>) -> Vec<usize> {
-    indexes
-        .as_slice()
-        .windows(2)
-        .map(move |win| win[1] - win[0])
-        .collect()
 }
 
 fn compute_bin_indexes(config: &BinConfig, num_bins: usize) -> Vec<usize> {

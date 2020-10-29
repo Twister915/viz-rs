@@ -48,7 +48,7 @@ pub trait Framed<E> {
 
     fn seek_frame(&mut self, n: isize) -> Result<()>;
 
-    fn next_frame(&mut self) -> Result<Option<&[E]>>;
+    fn next_frame(&mut self) -> Result<Option<&mut [E]>>;
 
     fn num_frames(&self) -> usize;
 
@@ -77,6 +77,17 @@ pub trait Framed<E> {
             mapper,
             buf: Vec::with_capacity(cap),
             cap,
+            _in_typ: PhantomData,
+        })
+    }
+
+    fn map_mut<F>(self, mapper: F) -> MappedFramed<Self, FramedMutMapFn<E, F>, E, E>
+    where
+        Self: Sized,
+        F: FnMut(&mut E) -> (),
+    {
+        self.lift(move |_| FramedMutMapFn {
+            mapper,
             _in_typ: PhantomData,
         })
     }
@@ -174,18 +185,35 @@ macro_rules! delegate_impls {
 }
 
 pub trait FramedMapper<T, R> {
-    fn map<'a, 'b>(&'b mut self, input: &'a [T]) -> Result<Option<&'b [R]>>;
+    fn map<'a>(&'a mut self, input: &'a mut [T]) -> Result<Option<&'a mut [R]>>;
 
     fn map_frame_size(&self, orig: usize) -> usize {
         orig
     }
 }
 
-pub trait MapperToChanneled<T, R>: Sized {
-    fn into_channeled(self) -> ChanneledMapperWrapper<Self, T, R>;
+pub trait MapperToChanneled<T: Copy, R: Copy>: Sized + FramedMapper<T, R> {
+    type Channeled: FramedMapper<Channeled<T>, Channeled<R>> = ChanneledMapperWrapper<Self, T, R>;
+
+    fn into_channeled(self) -> Self::Channeled;
 
     fn channeled(self, size: usize) -> ChanneledMapperWrapper<Self, T, R> {
         ChanneledMapperWrapper::new(self, size, size)
+    }
+}
+
+pub struct FramedMutMapFn<T, F> {
+    mapper: F,
+    _in_typ: PhantomData<T>,
+}
+
+impl<T, F> FramedMapper<T, T> for FramedMutMapFn<T, F>
+where
+    F: FnMut(&mut T) -> (),
+{
+    fn map<'a>(&'a mut self, input: &'a mut [T]) -> Result<Option<&'a mut [T]>> {
+        input.iter_mut().for_each(&mut self.mapper);
+        Ok(Some(input))
     }
 }
 
@@ -200,17 +228,19 @@ impl<T, R, F> FramedMapper<T, R> for FramedMapFn<T, R, F>
 where
     F: Fn(&T) -> R,
 {
-    fn map(&mut self, input: &[T]) -> Result<Option<&[R]>> {
+    fn map<'a>(&'a mut self, input: &'a mut [T]) -> Result<Option<&'a mut [R]>> {
         self.buf.clear();
         let mapper = &self.mapper;
         self.buf.extend(input.iter().map(mapper));
-        Ok(Some(self.buf.as_slice()))
+        Ok(Some(self.buf.as_mut_slice()))
     }
 }
 
 impl<T, R, F> MapperToChanneled<T, R> for FramedMapFn<T, R, F>
 where
     F: Fn(&T) -> R,
+    T: Copy,
+    R: Copy,
 {
     fn into_channeled(self) -> ChanneledMapperWrapper<Self, T, R> {
         let cap = self.cap;
@@ -234,7 +264,7 @@ where
         self.source.seek_frame(n)
     }
 
-    fn next_frame(&mut self) -> Result<Option<&[R]>> {
+    fn next_frame(&mut self) -> Result<Option<&mut [R]>> {
         if let Some(data) = self.source.next_frame()? {
             self.mapper.map(data)
         } else {
@@ -289,7 +319,10 @@ where
     T: Clone + Copy,
     R: Clone + Copy,
 {
-    fn map(&mut self, input: &[Channeled<T>]) -> Result<Option<&[Channeled<R>]>> {
+    fn map<'a>(
+        &'a mut self,
+        input: &'a mut [Channeled<T>],
+    ) -> Result<Option<&'a mut [Channeled<R>]>> {
         // initialize buffer for input lazily
         let in_bufs = if let Some(in_bufs) = self.in_bufs.as_mut() {
             in_bufs
@@ -299,7 +332,7 @@ where
                 self.in_bufs = Some(bufs);
                 self.in_bufs.as_mut().unwrap()
             } else {
-                return Ok(Some(&[]));
+                return Ok(Some(&mut []));
             }
         };
 
@@ -324,7 +357,7 @@ where
         let zip_buf = &mut self.zip_buf;
         // go through input data
         in_bufs
-            .as_ref()
+            .as_mut_ref()
             // zip with an out buf for each channel
             .zip(out_bufs.as_mut_ref())
             .expect("mix stereo/mono?")
@@ -348,7 +381,7 @@ where
                     .map(move |_| {
                         zip_buf.clear();
                         zip_buf.extend(out_bufs.as_ref().into_iter().copy_elements());
-                        zip_buf.as_slice()
+                        zip_buf.as_mut_slice()
                     })
             })
     }

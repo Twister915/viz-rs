@@ -1,7 +1,8 @@
-use crate::framed::{ChanneledMapperWrapper, FramedMapper, MapperToChanneled};
+use crate::framed::{FramedMapper, MapperToChanneled};
 use crate::util::log_timed;
 use anyhow::Result;
 use std::f64::consts::PI;
+use crate::channeled::Channeled;
 
 pub trait WindowingFunction {
     fn coefficient(idx: f64, count: f64) -> f64;
@@ -13,15 +14,14 @@ pub trait WindowingFunction {
     fn mapper(size: usize) -> MemoizedWindowingMapper {
         log_timed(
             format!("compute windowing function values for size {}", size),
-            || {
-                let mut coefficients = Vec::with_capacity(size);
-                for i in 0..size {
-                    coefficients.push(Self::coefficient(i as f64, size as f64));
-                }
-                MemoizedWindowingMapper {
-                    coefficients,
-                    buf: Vec::with_capacity(size),
-                }
+            || MemoizedWindowingMapper {
+                coefficients: {
+                    let mut out = Vec::with_capacity(size);
+                    for i in 0..size {
+                        out.push(Self::coefficient(i as f64, size as f64));
+                    }
+                    out
+                },
             },
         )
     }
@@ -51,28 +51,40 @@ impl WindowingFunction for BlackmanNuttall {
 
 pub struct MemoizedWindowingMapper {
     coefficients: Vec<f64>,
-    buf: Vec<f64>,
 }
 
 impl FramedMapper<f64, f64> for MemoizedWindowingMapper {
-    fn map(&mut self, input: &[f64]) -> Result<Option<&[f64]>> {
-        self.buf.clear();
+    fn map<'a>(&'a mut self, input: &'a mut [f64]) -> Result<Option<&'a mut [f64]>> {
+        input
+            .iter_mut()
+            .zip(self.coefficients.iter().copied())
+            .for_each(move |(v, cf)| *v *= cf);
 
-        self.buf.extend(
-            input
-                .iter()
-                .copied()
-                .zip(self.coefficients.iter().copied())
-                .map(move |(v, cf)| cf * v),
-        );
-
-        Ok(Some(self.buf.as_slice()))
+        Ok(Some(input))
     }
 }
 
 impl MapperToChanneled<f64, f64> for MemoizedWindowingMapper {
-    fn into_channeled(self) -> ChanneledMapperWrapper<Self, f64, f64> {
-        let size = self.coefficients.len();
-        self.channeled(size)
+    type Channeled = MemoizedWindowingMapperChanneled;
+
+    fn into_channeled(self) -> Self::Channeled {
+        MemoizedWindowingMapperChanneled {
+            coefficients: self.coefficients,
+        }
+    }
+}
+
+pub struct MemoizedWindowingMapperChanneled {
+    coefficients: Vec<f64>
+}
+
+impl FramedMapper<Channeled<f64>, Channeled<f64>> for MemoizedWindowingMapperChanneled {
+    fn map<'a>(&'a mut self, input: &'a mut [Channeled<f64>]) -> Result<Option<&'a mut [Channeled<f64>]>> {
+        input
+            .iter_mut()
+            .zip(self.coefficients.iter().copied())
+            .for_each(move |(v, cf)| v.as_mut_ref().for_each(move |v| *v = cf * *v));
+
+        Ok(Some(input))
     }
 }

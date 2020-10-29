@@ -3,12 +3,26 @@ use std::iter::{FusedIterator, TrustedLen};
 use std::ops::Sub;
 use std::time::{Duration, Instant};
 
-pub fn two_dimensional_vec<E>(sizes: &Vec<usize>) -> Vec<Vec<E>> {
-    sizes
-        .iter()
-        .copied()
-        .map(move |size| Vec::with_capacity(size))
-        .collect()
+pub fn slice_copy_from<T, I>(slice: &mut [T], mut iter: I) -> &mut [T]
+where
+    I: Iterator<Item = T>,
+{
+    let n = slice.len();
+    let mut idx = 0;
+
+    loop {
+        if idx >= n {
+            return &mut slice[..idx];
+        }
+
+        if let Some(v) = iter.next() {
+            slice[idx] = v;
+        } else {
+            return &mut slice[..idx];
+        }
+
+        idx += 1;
+    }
 }
 
 pub fn try_use_iter<I, T, F>(source: I, mut consumer: F) -> Result<()>

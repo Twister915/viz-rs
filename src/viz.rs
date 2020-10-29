@@ -1,10 +1,9 @@
 use crate::binner::{BinConfig, Binner};
 use crate::channeled::Channeled;
-use crate::db::DbMapper;
 use crate::exponential_smoothing::ExponentialSmoothing;
 use crate::fft::FramedFft;
 use crate::fraction::Fraction;
-use crate::framed::{Framed, FramedMapper, MapperToChanneled, Sampled, Samples};
+use crate::framed::{Framed, MapperToChanneled, Sampled, Samples};
 use crate::player::WavPlayer;
 use crate::savitzky_golay::SavitzkyGolayConfig;
 use crate::sliding::SlidingFrame;
@@ -19,6 +18,7 @@ use sdl2::rect::Rect;
 use sdl2::render::WindowCanvas;
 use std::ops::{Add, Sub};
 use std::time::{Duration, Instant};
+use crate::timer::FramedTimed;
 
 #[cfg(debug_assertions)]
 const FPS: u64 = 60;
@@ -143,7 +143,7 @@ pub fn visualize(file: &str) -> Result<()> {
 const ALPHA0: f64 = 0.80;
 const ALPHA1: f64 = 0.60;
 
-fn create_data_src(file: &str) -> Result<(impl Framed<Flattened>, WavFile)> {
+fn create_data_src(file: &str) -> Result<(impl Framed<f64>, WavFile)> {
     const SEEK_BACK_LIMIT: usize = 1;
     const BUF_SIZE: usize = 32768;
 
@@ -155,6 +155,7 @@ fn create_data_src(file: &str) -> Result<(impl Framed<Flattened>, WavFile)> {
             let frame_rate = Fraction::new(1, FPS as i64).unwrap();
             let frame_stride = frame_rate * sample_rate;
             let frame_stride = frame_stride.rounded() as usize;
+            println!("sliding window: stride={}, size={}", frame_stride, frame_size);
             SlidingFrame::new(wav, frame_size, frame_stride)
         })
         .lift(move |size| BlackmanNuttall::mapper(size).into_channeled())
@@ -180,9 +181,9 @@ fn create_data_src(file: &str) -> Result<(impl Framed<Flattened>, WavFile)> {
             };
             source.apply_mapper(Binner::new(config).into_channeled())
         })
-        .lift(move |size| DbMapper::new(size).into_channeled())
-        .map(move |d| d.map(move |v| normalize_between(v, -35.0, -8.5)))
-        .map(move |d| d.map(move |v| normalize_infs(v)))
+        .map_mut(channeled_map_mut(to_db))
+        .map_mut(channeled_map_mut(move |v| normalize_between(v, -35.0, -8.5)))
+        .map_mut(channeled_map_mut(normalize_infs))
         .lift(move |size| {
             SavitzkyGolayConfig {
                 window_size: 7,
@@ -192,46 +193,54 @@ fn create_data_src(file: &str) -> Result<(impl Framed<Flattened>, WavFile)> {
             .into_mapper(size)
             .into_channeled()
         })
-        .map(move |v| v.map(move |e| constrain_normalized(e)))
+        .map_mut(channeled_map_mut(constrain_normalized))
         .compose(move |frames| ExponentialSmoothing::new(frames, SEEK_BACK_LIMIT, ALPHA1))
-        .lift(move |size| ChannelFlattener::new(size));
+        .map(flatten_channels)
+        .compose(move |frames| FramedTimed::new(frames, 1024));
 
     Ok((frame_src, WavFile::open(file, BUF_SIZE)?))
 }
 
-fn normalize_between(v: f64, min: f64, max: f64) -> f64 {
-    if v < min {
-        0.0
-    } else if v > max {
-        1.0
+fn to_db(v: &mut f64) {
+    *v = 20.0 * v.log10();
+}
+
+fn normalize_between(v: &mut f64, min: f64, max: f64) {
+    let vv = *v;
+    if vv < min {
+        *v = 0.0;
+    } else if vv > max {
+        *v = 1.0;
     } else {
-        (v - min) / (max - min)
+        *v = (vv - min) / (max - min);
     }
 }
 
-fn normalize_infs(v: f64) -> f64 {
-    if v.is_nan() {
-        0.0
-    } else if v == f64::INFINITY {
-        1.0
-    } else if v == f64::NEG_INFINITY {
-        0.0
-    } else {
-        v
+fn normalize_infs(v: &mut f64) {
+    let vv = *v;
+    if v.is_nan() || vv == f64::NEG_INFINITY {
+        *v = 0.0;
+    } else if vv == f64::INFINITY {
+        *v = 1.0;
     }
 }
 
-fn constrain_normalized(v: f64) -> f64 {
-    if v > 1.0 {
-        1.0
-    } else if v < 0.0 {
-        0.0
-    } else {
-        v
+fn constrain_normalized(v: &mut f64) {
+    let vv = *v;
+    if vv > 1.0 {
+        *v = 1.0;
+    } else if vv < 0.0 {
+        *v = 0.0;
     }
 }
 
-fn draw_frame(canvas: &mut WindowCanvas, frame: &[Flattened]) -> Result<()> {
+fn channeled_map_mut<F, T>(mut f: F) -> impl FnMut(&mut Channeled<T>) where F: FnMut(&mut T) {
+    move |input| {
+        input.as_mut_ref().for_each(&mut f);
+    }
+}
+
+fn draw_frame(canvas: &mut WindowCanvas, frame: &[f64]) -> Result<()> {
     const BIN_MARGIN: u32 = 3;
 
     canvas.set_draw_color(Color::BLACK);
@@ -249,8 +258,7 @@ fn draw_frame(canvas: &mut WindowCanvas, frame: &[Flattened]) -> Result<()> {
         let rx = lx + width_per_bin;
         cur_x = rx + BIN_MARGIN;
 
-        let flattened = frame[i as usize];
-        let v = flattened.avg;
+        let v = frame[i as usize];
         let mut ty = ((1.0 - v) * (avail_height as f64)) as u32;
         const MIN_HEIGHT: u32 = 4;
         if ty < MIN_HEIGHT {
@@ -282,65 +290,10 @@ fn map_sdl_err(err: String) -> anyhow::Error {
     anyhow::anyhow!("sdl2: {}", err)
 }
 
-struct ChannelFlattener {
-    high_water: Vec<f64>,
-    buf: Vec<Flattened>,
-}
-
-impl ChannelFlattener {
-    fn new(size: usize) -> Self {
-        Self {
-            high_water: Vec::with_capacity(size),
-            buf: Vec::with_capacity(size),
-        }
-    }
-}
-
-#[derive(PartialEq, Clone, Copy, Debug)]
-struct Flattened {
-    pub high_water: f64,
-    pub high_channel: f64,
-    pub avg: f64,
-}
-
-impl FramedMapper<Channeled<f64>, Flattened> for ChannelFlattener {
-    fn map(&mut self, input: &[Channeled<f64>]) -> Result<Option<&[Flattened]>> {
-        use Channeled::*;
-        self.buf.clear();
-        for (idx, elem) in input.iter().enumerate() {
-            let avg = match *elem {
-                Mono(v) => v,
-                Stereo(a, b) => (a + b) / 2.0,
-            };
-
-            let max = match *elem {
-                Mono(v) => v,
-                Stereo(a, b) => {
-                    if a > b {
-                        a
-                    } else {
-                        b
-                    }
-                }
-            };
-
-            let high_water = if let Some(hw) = self.high_water.get_mut(idx) {
-                if *hw < max {
-                    *hw = max;
-                }
-                *hw
-            } else {
-                self.high_water.push(max);
-                max
-            };
-
-            self.buf.push(Flattened {
-                high_water,
-                high_channel: max,
-                avg,
-            });
-        }
-
-        Ok(Some(&self.buf[..]))
+fn flatten_channels(input: &Channeled<f64>) -> f64 {
+    use Channeled::*;
+    match *input {
+        Stereo(a, b) => (a + b) / 2.0,
+        Mono(v) => v,
     }
 }
