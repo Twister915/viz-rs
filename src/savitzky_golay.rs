@@ -189,8 +189,7 @@ impl SavitzkyGolayMapper {
 impl FramedMapper<f64, f64> for SavitzkyGolayMapper {
     fn map(&mut self, input: &[f64]) -> Result<Option<&[f64]>> {
         let coefficients = self.coefficients.as_slice();
-        let n_coefficients = coefficients.len();
-        let half_size = n_coefficients / 2;
+        let half_size = coefficients.len() / 2;
 
         self.buf.clear();
         // convolution!

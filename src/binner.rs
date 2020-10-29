@@ -12,7 +12,7 @@ pub struct Binner {
 
 impl Binner {
     pub fn new(config: BinConfig) -> Self {
-        let indexes = compute_bin_indexes(&config);
+        let indexes = compute_bin_indexes(&config, config.bins);
         let n_bins = indexes.len() - 1;
         let sizes = compute_bin_sizes(&indexes);
         let bufs = two_dimensional_vec(&sizes);
@@ -108,27 +108,29 @@ fn compute_bin_sizes(indexes: &Vec<usize>) -> Vec<usize> {
     out
 }
 
-fn compute_bin_indexes(config: &BinConfig) -> Vec<usize> {
+fn compute_bin_indexes(config: &BinConfig, num_bins: usize) -> Vec<usize> {
     let total_max_freq = (config.sample_rate as f64) / 2.0;
     let bandwidth_per_src_bin = total_max_freq / (config.input_size as f64);
     let gamma_inv = 1.0 / config.gamma;
-    let n_bins = config.bins as f64;
-    let mut out = vec![None; config.bins + 1];
+    let n_bins = num_bins as f64;
+    let freq_range = config.fmax - config.fmin;
+    let mut out = vec![None; num_bins + 1];
+    let hz_for_idx = move |idx: usize| (idx as f64) * bandwidth_per_src_bin;
     for i in 0..config.input_size {
-        let ifl = i as f64;
-        let f_start = ifl * bandwidth_per_src_bin;
+        let f_start = hz_for_idx(i);
         if f_start < config.fmin {
             continue;
         }
 
-        let mut bin_idx = ((f_start / total_max_freq).powf(gamma_inv) * n_bins).round() as isize;
+        let mut bin_idx =
+            (((f_start - config.fmin) / freq_range).powf(gamma_inv) * n_bins).round() as isize;
         if bin_idx < 0 {
             continue;
         }
 
-        let is_last = bin_idx >= (config.bins as isize);
+        let is_last = bin_idx >= (num_bins as isize);
         if is_last {
-            bin_idx = config.bins as isize;
+            bin_idx = num_bins as isize;
         }
 
         let bin_idx = bin_idx as usize;
@@ -159,5 +161,44 @@ fn compute_bin_indexes(config: &BinConfig) -> Vec<usize> {
         }
     }
 
-    fin_out
+    let n_bins_out = fin_out.len() - 1;
+    if n_bins_out < config.bins {
+        println!(
+            "use {} bins for {} desired bins (have {} bins with {})",
+            num_bins + 1,
+            config.bins,
+            n_bins_out,
+            num_bins,
+        );
+        compute_bin_indexes(config, num_bins + 1)
+    } else {
+        let sizes = fin_out
+            .windows(2)
+            .map(move |win| win[1] - win[0])
+            .collect::<Vec<usize>>();
+
+        sizes
+            .iter()
+            .copied()
+            .zip(
+                fin_out
+                    .windows(2)
+                    .map(move |win| ((win[0], hz_for_idx(win[0])), (win[1], hz_for_idx(win[1])))),
+            )
+            .enumerate()
+            .for_each(move |(idx, (size, ((from, from_hz), (to, to_hz))))| {
+                println!(
+                    "bin[{}] size={} :: {}..{} {:.2}Hz..{:.2}Hz",
+                    idx, size, from, to, from_hz, to_hz,
+                )
+            });
+
+        let total_size = sizes.iter().copied().sum::<usize>();
+        println!(
+            "total size :: {} (/ {}) -> {}",
+            total_size, config.input_size, n_bins_out
+        );
+
+        fin_out
+    }
 }

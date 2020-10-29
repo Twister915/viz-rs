@@ -25,7 +25,7 @@ const FPS: u64 = 60;
 #[cfg(not(debug_assertions))]
 const FPS: u64 = 150;
 
-const DATA_WINDOW_MS: u64 = 60;
+const DATA_WINDOW_MS: u64 = 120;
 
 pub fn visualize(file: &str) -> Result<()> {
     let sdl_context = sdl2::init().map_err(map_sdl_err)?;
@@ -169,7 +169,7 @@ fn create_data_src(file: &str) -> Result<(impl Framed<Flattened>, WavFile)> {
             let config = BinConfig {
                 bins: 48,
                 fmin: 42.0,
-                fmax: 6000.0,
+                fmax: 16000.0,
                 gamma: 2.3,
                 input_size: source.full_frame_size(),
                 sample_rate: source.sample_rate(),

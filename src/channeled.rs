@@ -135,7 +135,10 @@ where
     fn next(&mut self) -> Option<Self::Item> {
         use Channeled::*;
         match &mut self.iters {
-            Stereo(a, b) => a.next().zip(b.next()).map(move |(a, b)| Stereo(a, b)),
+            Stereo(a, b) => match (a.next(), b.next()) {
+                (Some(va), Some(vb)) => Some(Stereo(va, vb)),
+                _ => None,
+            },
             Mono(v) => v.next().map(move |v| Mono(v)),
         }
     }
@@ -167,5 +170,7 @@ where
 }
 
 unsafe impl<I> TrustedLen for ChanneledIter<I> where I: Iterator + TrustedLen {}
+
 impl<I> ExactSizeIterator for ChanneledIter<I> where I: Iterator + ExactSizeIterator {}
+
 impl<I> FusedIterator for ChanneledIter<I> where I: Iterator + FusedIterator {}
