@@ -1,5 +1,7 @@
 use anyhow::Result;
 use std::iter::{FusedIterator, TrustedLen};
+use std::ops::Sub;
+use std::time::{Duration, Instant};
 
 pub fn two_dimensional_vec<E>(sizes: &Vec<usize>) -> Vec<Vec<E>> {
     sizes
@@ -53,6 +55,26 @@ where
         let (_, max) = self.source.size_hint();
         (0, max)
     }
+}
+
+pub fn log_timed<F, R>(name: String, f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    println!("start {}", name);
+    let (dur, out) = timed(f);
+    println!("done {}, took {:?}", name, dur);
+    out
+}
+
+pub fn timed<F, R>(f: F) -> (Duration, R)
+where
+    F: FnOnce() -> R,
+{
+    let start_at = Instant::now();
+    let result = f();
+    let time_taken = Instant::now().sub(start_at);
+    (time_taken, result)
 }
 
 unsafe impl<I, R> TrustedLen for TryUseValueIter<I> where I: Iterator<Item = Result<R>> + TrustedLen {}

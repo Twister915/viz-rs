@@ -1,4 +1,5 @@
 use crate::framed::{ChanneledMapperWrapper, FramedMapper, MapperToChanneled};
+use crate::util::log_timed;
 use anyhow::Result;
 use std::f64::consts::PI;
 
@@ -10,14 +11,19 @@ pub trait WindowingFunction {
     }
 
     fn mapper(size: usize) -> MemoizedWindowingMapper {
-        let mut coefficients = Vec::with_capacity(size);
-        for i in 0..size {
-            coefficients.push(Self::coefficient(i as f64, size as f64));
-        }
-        MemoizedWindowingMapper {
-            coefficients,
-            buf: Vec::with_capacity(size),
-        }
+        log_timed(
+            format!("compute windowing function values for size {}", size),
+            || {
+                let mut coefficients = Vec::with_capacity(size);
+                for i in 0..size {
+                    coefficients.push(Self::coefficient(i as f64, size as f64));
+                }
+                MemoizedWindowingMapper {
+                    coefficients,
+                    buf: Vec::with_capacity(size),
+                }
+            },
+        )
     }
 }
 

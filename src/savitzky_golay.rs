@@ -70,6 +70,7 @@
 ///
 use crate::fraction::Fraction;
 use crate::framed::{ChanneledMapperWrapper, FramedMapper, MapperToChanneled};
+use crate::util::log_timed;
 use anyhow::Result;
 use std::iter::{FusedIterator, TrustedLen};
 
@@ -156,16 +157,21 @@ impl SavitzkyGolayConfig {
         }
 
         let half_window_size = (self.window_size as i64) / 2;
-        (-half_window_size..=half_window_size)
-            .map(move |time_offset| {
-                weights(
-                    half_window_size,
-                    time_offset.into(),
-                    self.degree.into(),
-                    self.order.into(),
-                )
-            })
-            .collect()
+        log_timed(
+            format!("compute savitzky golay coefficients for {:?}", self),
+            || {
+                (-half_window_size..=half_window_size)
+                    .map(move |time_offset| {
+                        weights(
+                            half_window_size,
+                            time_offset.into(),
+                            self.degree.into(),
+                            self.order.into(),
+                        )
+                    })
+                    .collect()
+            },
+        )
     }
 }
 

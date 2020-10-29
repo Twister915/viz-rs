@@ -1,5 +1,5 @@
 use crate::framed::{ChanneledMapperWrapper, FramedMapper, MapperToChanneled};
-use crate::util::two_dimensional_vec;
+use crate::util::{log_timed, two_dimensional_vec};
 use anyhow::Result;
 
 pub struct Binner {
@@ -12,19 +12,21 @@ pub struct Binner {
 
 impl Binner {
     pub fn new(config: BinConfig) -> Self {
-        let indexes = compute_bin_indexes(&config, config.bins);
-        let n_bins = indexes.len() - 1;
-        let sizes = compute_bin_sizes(&indexes);
-        let bufs = two_dimensional_vec(&sizes);
-        let out_buf = Vec::with_capacity(n_bins);
-        let in_size = config.input_size;
-        Self {
-            bufs,
-            out_buf,
-            indexes,
-            n_bins,
-            in_size,
-        }
+        log_timed(format!("compute bin constants for {:?}", &config), || {
+            let indexes = compute_bin_indexes(&config, config.bins);
+            let n_bins = indexes.len() - 1;
+            let sizes = compute_bin_sizes(&indexes);
+            let bufs = two_dimensional_vec(&sizes);
+            let out_buf = Vec::with_capacity(n_bins);
+            let in_size = config.input_size;
+            Self {
+                bufs,
+                out_buf,
+                indexes,
+                n_bins,
+                in_size,
+            }
+        })
     }
 
     fn aggregate_bufs(&mut self) {
@@ -85,6 +87,7 @@ impl MapperToChanneled<f64, f64> for Binner {
     }
 }
 
+#[derive(PartialEq, Copy, Clone, Debug)]
 pub struct BinConfig {
     pub bins: usize,
     pub input_size: usize,
@@ -95,17 +98,11 @@ pub struct BinConfig {
 }
 
 fn compute_bin_sizes(indexes: &Vec<usize>) -> Vec<usize> {
-    let mut out = Vec::with_capacity(indexes.len() - 1);
-    let mut last_start_at = None;
-    for cur_start_at in indexes.iter().copied() {
-        if let Some(last_start_at) = last_start_at {
-            out.push(cur_start_at - last_start_at);
-        }
-
-        last_start_at = Some(cur_start_at);
-    }
-
-    out
+    indexes
+        .as_slice()
+        .windows(2)
+        .map(move |win| win[1] - win[0])
+        .collect()
 }
 
 fn compute_bin_indexes(config: &BinConfig, num_bins: usize) -> Vec<usize> {

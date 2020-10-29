@@ -17,6 +17,8 @@ mod util;
 mod viz;
 mod wav;
 mod window;
+mod timer;
+mod ring;
 
 fn main() {
     if let Some(target) = std::env::args().nth(1) {

@@ -8,6 +8,7 @@ use crate::framed::{Framed, FramedMapper, MapperToChanneled, Sampled, Samples};
 use crate::player::WavPlayer;
 use crate::savitzky_golay::SavitzkyGolayConfig;
 use crate::sliding::SlidingFrame;
+use crate::util::log_timed;
 use crate::wav::WavFile;
 use crate::window::{BlackmanNuttall, WindowingFunction};
 use anyhow::Result;
@@ -25,7 +26,7 @@ const FPS: u64 = 60;
 #[cfg(not(debug_assertions))]
 const FPS: u64 = 150;
 
-const DATA_WINDOW_MS: u64 = 120;
+const DATA_WINDOW_MS: u64 = 80;
 
 pub fn visualize(file: &str) -> Result<()> {
     let sdl_context = sdl2::init().map_err(map_sdl_err)?;
@@ -39,7 +40,10 @@ pub fn visualize(file: &str) -> Result<()> {
     canvas.clear();
     canvas.present();
 
-    let (mut frames, wav_src) = create_data_src(file)?;
+    let (mut frames, wav_src) = log_timed(
+        format!("setup visualizer math pipeline for {}", file),
+        || create_data_src(file),
+    )?;
     let mut wav_player = WavPlayer::new(sdl_context.audio().map_err(map_sdl_err)?, wav_src);
 
     let mut event_pump = sdl_context.event_pump().map_err(map_sdl_err)?;

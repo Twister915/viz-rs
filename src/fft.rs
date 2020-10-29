@@ -1,5 +1,6 @@
 use crate::channeled::Channeled;
 use crate::framed::FramedMapper;
+use crate::util::log_timed;
 use anyhow::{anyhow, Result};
 use fftw::array::AlignedVec;
 use fftw::plan::{R2CPlan, R2CPlan64};
@@ -33,8 +34,9 @@ impl FramedFft {
         // fft is defined as having (N / 2) + 1 outputs but we skip
         // DC at index 0 so N / 2
         let n_out = cap / 2;
-        let plan = R2CPlan64::aligned(&[cap], Flag::MEASURE | Flag::DESTROYINPUT)
-            .map_err(map_fftw_error)?;
+        let plan = log_timed(format!("plan fft for size {}", cap), || {
+            R2CPlan64::aligned(&[cap], Flag::ESTIMATE | Flag::DESTROYINPUT).map_err(map_fftw_error)
+        })?;
         Ok(Self {
             plan,
             bufs: None,
