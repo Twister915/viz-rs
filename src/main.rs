@@ -8,7 +8,6 @@ mod binner;
 mod channeled;
 mod exponential_smoothing;
 mod fft;
-mod fraction;
 mod framed;
 mod player;
 mod savitzky_golay;

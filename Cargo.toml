@@ -10,6 +10,8 @@ edition = "2018"
 anyhow = "1.0.33"
 fftw = "0.6.2"
 sdl2 = "0.34.3"
+rayon = "1.5"
+num-rational = "0.3.0"
 
 #[profile.dev]
 #opt-level = 1

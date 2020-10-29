@@ -2,7 +2,6 @@ use crate::binner::{BinConfig, Binner};
 use crate::channeled::Channeled;
 use crate::exponential_smoothing::ExponentialSmoothing;
 use crate::fft::FramedFft;
-use crate::fraction::Fraction;
 use crate::framed::{Framed, MapperToChanneled, Sampled, Samples};
 use crate::player::WavPlayer;
 use crate::savitzky_golay::SavitzkyGolayConfig;
@@ -19,14 +18,15 @@ use sdl2::render::WindowCanvas;
 use std::ops::{Add, Sub};
 use std::time::{Duration, Instant};
 use crate::timer::FramedTimed;
+use num_rational::Rational64;
 
 #[cfg(debug_assertions)]
 const FPS: u64 = 60;
 
 #[cfg(not(debug_assertions))]
-const FPS: u64 = 150;
+const FPS: u64 = 160;
 
-const DATA_WINDOW_MS: u64 = 80;
+const DATA_WINDOW_MS: u64 = 100;
 
 pub fn visualize(file: &str) -> Result<()> {
     let sdl_context = sdl2::init().map_err(map_sdl_err)?;
@@ -151,10 +151,10 @@ fn create_data_src(file: &str) -> Result<(impl Framed<f64>, WavFile)> {
         .map(move |v| v.map(move |c| c.into()))
         .compose(move |wav| {
             let frame_size = wav.samples_from_dur(Duration::from_millis(DATA_WINDOW_MS));
-            let sample_rate = Fraction::new(wav.sample_rate() as i64, 1).unwrap();
-            let frame_rate = Fraction::new(1, FPS as i64).unwrap();
+            let sample_rate: Rational64 = (wav.sample_rate() as i64).into();
+            let frame_rate = Rational64::new_raw(1, FPS as i64);
             let frame_stride = frame_rate * sample_rate;
-            let frame_stride = frame_stride.rounded() as usize;
+            let frame_stride = *frame_stride.round().numer() as usize;
             println!("sliding window: stride={}, size={}", frame_stride, frame_size);
             SlidingFrame::new(wav, frame_size, frame_stride)
         })
@@ -163,8 +163,8 @@ fn create_data_src(file: &str) -> Result<(impl Framed<f64>, WavFile)> {
         .compose(move |frames| ExponentialSmoothing::new(frames, SEEK_BACK_LIMIT, ALPHA0))
         .lift(move |size| {
             SavitzkyGolayConfig {
-                window_size: 27,
-                degree: 7,
+                window_size: 47,
+                degree: 8,
                 order: 0,
             }
             .into_mapper(size)

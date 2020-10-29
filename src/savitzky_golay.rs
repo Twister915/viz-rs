@@ -68,17 +68,18 @@
 ///   but since we're multiplying and summing the data by these coefficients, and we don't want to
 ///   scale the input data at all, we must normalize each coefficient row so that it sums to 1.
 ///
-use crate::fraction::Fraction;
 use crate::framed::{ChanneledMapperWrapper, FramedMapper, MapperToChanneled};
 use crate::util::log_timed;
 use anyhow::Result;
 use std::iter::{FusedIterator, TrustedLen};
+use num_rational::Rational64;
+use rayon::prelude::*;
 
 // thanks to: https://github.com/arntanguy/gram_savitzky_golay/tree/master/src
 // thanks to: https://github.com/mirkov/savitzky-golay/blob/master/gram-poly.lisp
 // thanks to: https://www.mathworks.com/matlabcentral/mlc-downloads/downloads/submissions/48493/versions/1/previews/Functions/grampoly.m/index.html
-fn gram_poly(i: Fraction, m: Fraction, k: Fraction, s: Fraction) -> Fraction {
-    if k > 0 {
+fn gram_poly(i: Rational64, m: Rational64, k: Rational64, s: Rational64) -> Rational64 {
+    if k > 0.into() {
         let r0 = gram_poly(i, m, k - 1, s);
         let r1 = gram_poly(i, m, k - 1, s - 1);
         let r2 = gram_poly(i, m, k - 2, s);
@@ -86,7 +87,7 @@ fn gram_poly(i: Fraction, m: Fraction, k: Fraction, s: Fraction) -> Fraction {
         ((((k * 4) - 2) / (k * (m * 2 - k + 1))) * (i * r0 + s * r1))
             - ((k - 1) * (m * 2 + k)) / (k * (m * 2 - k + 1)) * r2
     } else {
-        if k == 0 && s == 0 {
+        if k == 0.into() && s == 0.into() {
             1.into()
         } else {
             0.into()
@@ -94,7 +95,7 @@ fn gram_poly(i: Fraction, m: Fraction, k: Fraction, s: Fraction) -> Fraction {
     }
 }
 
-fn gen_fact(a: Fraction, b: Fraction) -> Fraction {
+fn gen_fact(a: Rational64, b: Rational64) -> Rational64 {
     let mut gf = 1.into();
     let mut j = (a - b) + 1;
     while j <= a {
@@ -105,8 +106,8 @@ fn gen_fact(a: Fraction, b: Fraction) -> Fraction {
     gf
 }
 
-fn weight(i: Fraction, t: Fraction, m: Fraction, n: Fraction, s: Fraction) -> Fraction {
-    let mut w = 0.into();
+fn weight(i: Rational64, t: Rational64, m: Rational64, n: Rational64, s: Rational64) -> Rational64 {
+    let mut w: Rational64 = 0.into();
     let mut k = 0.into();
     while k <= n {
         let fact0 = gen_fact(m * 2, k);
@@ -120,20 +121,19 @@ fn weight(i: Fraction, t: Fraction, m: Fraction, n: Fraction, s: Fraction) -> Fr
     w
 }
 
-fn weights(m: i64, t: Fraction, n: Fraction, s: Fraction) -> Vec<Fraction> {
+fn weights(m: i64, t: Rational64, n: Rational64, s: Rational64) -> Vec<Rational64> {
     let count = (2 * m) + 1;
-    let mut fracs = Vec::with_capacity(count as usize);
-    for i in 0..count {
-        let weight = weight(((i - m) as i64).into(), t, (m as i64).into(), n, s);
-        fracs.push(weight);
-    }
+    let fracs = (0..count)
+        .into_par_iter()
+        .map(move |i| weight(((i - m) as i64).into(), t, (m as i64).into(), n, s))
+        .collect::<Vec<_>>();
 
     let sum = fracs
         .iter()
         .copied()
-        .fold(0.into(), move |sm: Fraction, elem| sm + elem);
+        .fold(0.into(), move |sm: Rational64, elem| sm + elem);
 
-    fracs.into_iter().map(move |f| f / sum).collect()
+    fracs.into_iter().map(move |f| (f / sum)).map(move |f| f.reduced()).collect()
 }
 
 #[derive(PartialEq, Eq, Debug, Copy, Clone, Hash)]
@@ -151,7 +151,7 @@ impl SavitzkyGolayConfig {
         SavitzkyGolayMapper::new(size, self)
     }
 
-    pub fn compute_coefficients(&self) -> Vec<Vec<Fraction>> {
+    pub fn compute_coefficients(&self) -> Vec<Vec<Rational64>> {
         if self.window_size % 2 == 0 || self.window_size < 3 {
             panic!("invalid window size {}", self.window_size)
         }
@@ -161,12 +161,13 @@ impl SavitzkyGolayConfig {
             format!("compute savitzky golay coefficients for {:?}", self),
             || {
                 (-half_window_size..=half_window_size)
+                    .into_par_iter()
                     .map(move |time_offset| {
                         weights(
                             half_window_size,
                             time_offset.into(),
-                            self.degree.into(),
-                            self.order.into(),
+                            (self.degree as i64).into(),
+                            (self.order as i64).into(),
                         )
                     })
                     .collect()
@@ -179,7 +180,7 @@ impl SavitzkyGolayConfig {
 pub struct SavitzkyGolayMapper {
     buf: Vec<f64>,
     cap: usize,
-    coefficients: Vec<Vec<Fraction>>,
+    coefficients: Vec<Vec<Rational64>>,
 }
 
 impl SavitzkyGolayMapper {
@@ -223,12 +224,16 @@ impl FramedMapper<f64, f64> for SavitzkyGolayMapper {
                     .iter()
                     .copied()
                     .zip(coefficients.iter().copied())
-                    .map(move |(i, cf)| cf * i)
+                    .map(move |(i, cf)| multiply_rational_float(cf, i))
                     .sum()
             });
 
         Ok(Some(input))
     }
+}
+
+fn multiply_rational_float(ratio: Rational64, float: f64) -> f64 {
+    (float * (*ratio.numer() as f64)) / (*ratio.denom() as f64)
 }
 
 impl MapperToChanneled<f64, f64> for SavitzkyGolayMapper {

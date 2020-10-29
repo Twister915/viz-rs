@@ -1,8 +1,8 @@
 use crate::channeled::Channeled;
-use crate::fraction::Fraction;
 use anyhow::Result;
 use std::marker::PhantomData;
 use std::time::Duration;
+use num_rational::Rational64;
 
 pub trait Framed<E> {
     fn apply_mapper<M, R>(self, mapper: M) -> MappedFramed<Self, M, E, R>
@@ -136,9 +136,8 @@ pub trait Samples<T>: Sampled {
 
 pub trait Sampled {
     fn samples_from_dur(&self, dur: Duration) -> usize {
-        ((Fraction::new(self.sample_rate() as i64, 1_000_000_000).unwrap())
-            * (dur.as_nanos() as i64))
-            .rounded() as usize
+        *((Rational64::new(self.sample_rate() as i64, 1_000_000_000))
+            * (dur.as_nanos() as i64)).round().numer() as usize
     }
 
     fn sample_rate(&self) -> usize;
