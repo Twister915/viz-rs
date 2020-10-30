@@ -33,10 +33,11 @@ impl FramedMapper<Channeled<f64>, Channeled<f64>> for ExponentialSmoothing {
                 .zip(prev.iter().copied())
                 .map(move |(new, pre)| new.zip(pre).expect("mono/stereo should match"))
                 .for_each(move |zipped| {
-                    zipped.for_each(move |(n, p)| *n = (*n * alpha_inv) + (p * alpha))
+                    zipped.for_each(move |(new, prev)| *new = (*new * alpha_inv) + (prev * alpha))
                 })
         }
 
+        // copy the computed data into the prev vec
         let mut new_prev = if self.previous.len() < self.n_prev {
             Vec::with_capacity(input.len())
         } else {
