@@ -1,5 +1,5 @@
 use anyhow::Result;
-use std::iter::{FusedIterator, TrustedLen};
+use std::iter::FusedIterator;
 use std::ops::Sub;
 use std::time::{Duration, Instant};
 
@@ -91,9 +91,4 @@ where
     (time_taken, result)
 }
 
-unsafe impl<I, R> TrustedLen for TryUseValueIter<I> where I: Iterator<Item = Result<R>> + TrustedLen {}
-impl<I, R> ExactSizeIterator for TryUseValueIter<I> where
-    I: Iterator<Item = Result<R>> + ExactSizeIterator
-{
-}
 impl<I, R> FusedIterator for TryUseValueIter<I> where I: Iterator<Item = Result<R>> + FusedIterator {}

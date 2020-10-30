@@ -1,4 +1,5 @@
-use crate::framed::{ChanneledMapperWrapper, FramedMapper, MapperToChanneled};
+use crate::channeled::Channeled;
+use crate::framed::FramedMapper;
 use crate::util::log_timed;
 use anyhow::Result;
 
@@ -23,8 +24,11 @@ impl Binner {
     }
 }
 
-impl FramedMapper<f64, f64> for Binner {
-    fn map<'a>(&'a mut self, input: &'a mut [f64]) -> Result<Option<&'a mut [f64]>> {
+impl FramedMapper<Channeled<f64>, Channeled<f64>> for Binner {
+    fn map<'a>(
+        &'a mut self,
+        input: &'a mut [Channeled<f64>],
+    ) -> Result<Option<&'a mut [Channeled<f64>]>> {
         if input.len() != self.in_size {
             return Ok(None);
         }
@@ -48,36 +52,35 @@ impl FramedMapper<f64, f64> for Binner {
                 break;
             }
 
-            if elem.is_finite() {
-                // can we use bin_idx in input slice?
+            if elem.map(move |elem| elem.is_finite()).and() {
                 if bin_idx > idx {
-                    panic!("can't use bin_idx in input slice {} is bin but idx avail is {}", bin_idx, idx)
+                    panic!(
+                        "can't use bin_idx in input slice {} is bin but idx avail is {}",
+                        bin_idx, idx
+                    )
                 }
 
                 while zeroed_bin_idx <= bin_idx {
-                    input[zeroed_bin_idx] = 0.0;
+                    input[zeroed_bin_idx] = elem.map(move |_| 0.0);
                     zeroed_bin_idx += 1;
                 }
 
-                input[bin_idx] += elem;
+                input[bin_idx] = input[bin_idx]
+                    .zip(elem)
+                    .expect("mixed stereo/mono?")
+                    .map(move |(c, v)| c + v);
             }
         }
 
         let in_size = self.in_size as f64;
-        input.iter_mut().for_each(move |e| *e /= in_size);
+        input
+            .iter_mut()
+            .for_each(move |e| e.as_mut_ref().for_each(move |v| *v /= in_size));
         Ok(Some(&mut input[..bin_idx]))
     }
 
     fn map_frame_size(&self, _: usize) -> usize {
         self.n_bins
-    }
-}
-
-impl MapperToChanneled<f64, f64> for Binner {
-    fn into_channeled(self) -> ChanneledMapperWrapper<Self, f64, f64> {
-        let in_size = self.in_size;
-        let out_size = self.n_bins;
-        ChanneledMapperWrapper::new(self, in_size, out_size)
     }
 }
 

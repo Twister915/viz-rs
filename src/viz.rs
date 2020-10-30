@@ -2,14 +2,16 @@ use crate::binner::{BinConfig, Binner};
 use crate::channeled::Channeled;
 use crate::exponential_smoothing::ExponentialSmoothing;
 use crate::fft::FramedFft;
-use crate::framed::{Framed, MapperToChanneled, Sampled, Samples};
+use crate::framed::{Framed, Sampled, Samples};
 use crate::player::WavPlayer;
 use crate::savitzky_golay::SavitzkyGolayConfig;
 use crate::sliding::SlidingFrame;
+use crate::timer::FramedTimed;
 use crate::util::log_timed;
 use crate::wav::WavFile;
 use crate::window::{BlackmanNuttall, WindowingFunction};
 use anyhow::Result;
+use num_rational::Rational64;
 use sdl2::event::Event;
 use sdl2::keyboard::Keycode;
 use sdl2::pixels::Color;
@@ -17,8 +19,6 @@ use sdl2::rect::Rect;
 use sdl2::render::WindowCanvas;
 use std::ops::{Add, Sub};
 use std::time::{Duration, Instant};
-use crate::timer::FramedTimed;
-use num_rational::Rational64;
 
 #[cfg(debug_assertions)]
 const FPS: u64 = 60;
@@ -155,12 +155,15 @@ fn create_data_src(file: &str) -> Result<(impl Framed<f64>, WavFile)> {
             let frame_rate = Rational64::new_raw(1, FPS as i64);
             let frame_stride = frame_rate * sample_rate;
             let frame_stride = *frame_stride.round().numer() as usize;
-            println!("sliding window: stride={}, size={}", frame_stride, frame_size);
+            println!(
+                "sliding window: stride={}, size={}",
+                frame_stride, frame_size
+            );
             SlidingFrame::new(wav, frame_size, frame_stride)
         })
-        .lift(move |size| BlackmanNuttall::mapper(size).into_channeled())
+        .lift(move |size| BlackmanNuttall::mapper(size))
         .try_lift(move |size| FramedFft::new(size))?
-        .compose(move |frames| ExponentialSmoothing::new(frames, SEEK_BACK_LIMIT, ALPHA0))
+        .lift(move |_| ExponentialSmoothing::new(SEEK_BACK_LIMIT, ALPHA0))
         .lift(move |size| {
             SavitzkyGolayConfig {
                 window_size: 47,
@@ -168,7 +171,6 @@ fn create_data_src(file: &str) -> Result<(impl Framed<f64>, WavFile)> {
                 order: 0,
             }
             .into_mapper(size)
-            .into_channeled()
         })
         .compose(move |source| {
             let config = BinConfig {
@@ -179,10 +181,12 @@ fn create_data_src(file: &str) -> Result<(impl Framed<f64>, WavFile)> {
                 input_size: source.full_frame_size(),
                 sample_rate: source.sample_rate(),
             };
-            source.apply_mapper(Binner::new(config).into_channeled())
+            source.apply_mapper(Binner::new(config))
         })
         .map_mut(channeled_map_mut(to_db))
-        .map_mut(channeled_map_mut(move |v| normalize_between(v, -35.0, -8.5)))
+        .map_mut(channeled_map_mut(move |v| {
+            normalize_between(v, -35.0, -8.5)
+        }))
         .map_mut(channeled_map_mut(normalize_infs))
         .lift(move |size| {
             SavitzkyGolayConfig {
@@ -191,10 +195,9 @@ fn create_data_src(file: &str) -> Result<(impl Framed<f64>, WavFile)> {
                 order: 0,
             }
             .into_mapper(size)
-            .into_channeled()
         })
         .map_mut(channeled_map_mut(constrain_normalized))
-        .compose(move |frames| ExponentialSmoothing::new(frames, SEEK_BACK_LIMIT, ALPHA1))
+        .lift(move |_| ExponentialSmoothing::new(SEEK_BACK_LIMIT, ALPHA1))
         .map(flatten_channels)
         .compose(move |frames| FramedTimed::new(frames, 1024));
 
@@ -234,7 +237,10 @@ fn constrain_normalized(v: &mut f64) {
     }
 }
 
-fn channeled_map_mut<F, T>(mut f: F) -> impl FnMut(&mut Channeled<T>) where F: FnMut(&mut T) {
+fn channeled_map_mut<F, T>(mut f: F) -> impl FnMut(&mut Channeled<T>)
+where
+    F: FnMut(&mut T),
+{
     move |input| {
         input.as_mut_ref().for_each(&mut f);
     }

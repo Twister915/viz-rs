@@ -1,8 +1,9 @@
 use crate::channeled::Channeled;
+use crate::util::try_use_iter;
 use anyhow::Result;
+use num_rational::Rational64;
 use std::marker::PhantomData;
 use std::time::Duration;
-use num_rational::Rational64;
 
 pub trait Framed<E> {
     fn apply_mapper<M, R>(self, mapper: M) -> MappedFramed<Self, M, E, R>
@@ -76,7 +77,6 @@ pub trait Framed<E> {
         self.lift(move |cap| FramedMapFn {
             mapper,
             buf: Vec::with_capacity(cap),
-            cap,
             _in_typ: PhantomData,
         })
     }
@@ -136,8 +136,9 @@ pub trait Samples<T>: Sampled {
 
 pub trait Sampled {
     fn samples_from_dur(&self, dur: Duration) -> usize {
-        *((Rational64::new(self.sample_rate() as i64, 1_000_000_000))
-            * (dur.as_nanos() as i64)).round().numer() as usize
+        *((Rational64::new(self.sample_rate() as i64, 1_000_000_000)) * (dur.as_nanos() as i64))
+            .round()
+            .numer() as usize
     }
 
     fn sample_rate(&self) -> usize;
@@ -191,16 +192,6 @@ pub trait FramedMapper<T, R> {
     }
 }
 
-pub trait MapperToChanneled<T: Copy, R: Copy>: Sized + FramedMapper<T, R> {
-    type Channeled: FramedMapper<Channeled<T>, Channeled<R>> = ChanneledMapperWrapper<Self, T, R>;
-
-    fn into_channeled(self) -> Self::Channeled;
-
-    fn channeled(self, size: usize) -> ChanneledMapperWrapper<Self, T, R> {
-        ChanneledMapperWrapper::new(self, size, size)
-    }
-}
-
 pub struct FramedMutMapFn<T, F> {
     mapper: F,
     _in_typ: PhantomData<T>,
@@ -219,7 +210,6 @@ where
 pub struct FramedMapFn<T, R, F> {
     mapper: F,
     buf: Vec<R>,
-    cap: usize,
     _in_typ: PhantomData<T>,
 }
 
@@ -232,18 +222,6 @@ where
         let mapper = &self.mapper;
         self.buf.extend(input.iter().map(mapper));
         Ok(Some(self.buf.as_mut_slice()))
-    }
-}
-
-impl<T, R, F> MapperToChanneled<T, R> for FramedMapFn<T, R, F>
-where
-    F: Fn(&T) -> R,
-    T: Copy,
-    R: Copy,
-{
-    fn into_channeled(self) -> ChanneledMapperWrapper<Self, T, R> {
-        let cap = self.cap;
-        self.channeled(cap)
     }
 }
 
@@ -289,106 +267,6 @@ where
 }
 
 delegate_impls!(MappedFramed<S, M, T, R>, S, source);
-
-pub struct ChanneledMapperWrapper<M, T, R> {
-    mapper: M,
-    zip_buf: Vec<Channeled<R>>,
-    out_bufs: Option<Channeled<Vec<R>>>,
-    in_bufs: Option<Channeled<Vec<T>>>,
-    in_size: usize,
-    out_size: usize,
-}
-
-impl<M, T, R> ChanneledMapperWrapper<M, T, R> {
-    pub fn new(mapper: M, in_size: usize, out_size: usize) -> Self {
-        Self {
-            mapper,
-            in_bufs: None,
-            out_bufs: None,
-            zip_buf: Vec::with_capacity(out_size),
-            in_size,
-            out_size,
-        }
-    }
-}
-
-impl<M, T, R> FramedMapper<Channeled<T>, Channeled<R>> for ChanneledMapperWrapper<M, T, R>
-where
-    M: FramedMapper<T, R>,
-    T: Clone + Copy,
-    R: Clone + Copy,
-{
-    fn map<'a>(
-        &'a mut self,
-        input: &'a mut [Channeled<T>],
-    ) -> Result<Option<&'a mut [Channeled<R>]>> {
-        // initialize buffer for input lazily
-        let in_bufs = if let Some(in_bufs) = self.in_bufs.as_mut() {
-            in_bufs
-        } else {
-            if let Some(i0) = input.get(0) {
-                let bufs = i0.as_ref().map(|_| Vec::with_capacity(self.in_size));
-                self.in_bufs = Some(bufs);
-                self.in_bufs.as_mut().unwrap()
-            } else {
-                return Ok(Some(&mut []));
-            }
-        };
-
-        // clear the input buffers, and push the input data into them
-        in_bufs.as_mut_ref().for_each(move |buf| buf.clear());
-        input.iter().for_each(|iv| {
-            iv.zip(in_bufs.as_mut_ref())
-                .expect("mixed mono/stereo?")
-                .for_each(move |(iv, buf)| buf.push(iv))
-        });
-
-        let out_bufs = if let Some(out_bufs) = self.out_bufs.as_mut() {
-            out_bufs
-        } else {
-            let out_size = self.out_size;
-            let bufs = in_bufs.as_ref().map(|_| Vec::with_capacity(out_size));
-            self.out_bufs = Some(bufs);
-            self.out_bufs.as_mut().unwrap()
-        };
-
-        let mapper = &mut self.mapper;
-        let zip_buf = &mut self.zip_buf;
-        // go through input data
-        in_bufs
-            .as_mut_ref()
-            // zip with an out buf for each channel
-            .zip(out_bufs.as_mut_ref())
-            .expect("mix stereo/mono?")
-            // for each channel...
-            .try_map(|(in_buf, out_buf)| {
-                // map the data using the mapper, copy output to the out buf
-                // this returns Result<Option<()>> where it's Some(()) if mapper give a value
-                // and it's None if mapper did not give a value
-                mapper.map(in_buf).map(move |option| {
-                    option.map(move |out| {
-                        out_buf.clear();
-                        out_buf.extend_from_slice(out);
-                    })
-                })
-            })
-            .map(move |result| {
-                // flatten Channel<Option<()>> to Option<Channeled<()>>
-                result
-                    .flatten_option()
-                    // if the option is present, zip the output buffers, and return them
-                    .map(move |_| {
-                        zip_buf.clear();
-                        zip_buf.extend(out_bufs.as_ref().into_iter().copy_elements());
-                        zip_buf.as_mut_slice()
-                    })
-            })
-    }
-
-    fn map_frame_size(&self, orig: usize) -> usize {
-        self.mapper.map_frame_size(orig)
-    }
-}
 
 pub struct MappedSamples<S, M, T, R> {
     source: S,
@@ -436,4 +314,61 @@ where
     fn num_samples_remain(&self) -> usize {
         self.source.num_samples_remain()
     }
+}
+
+pub struct ChanneledMapperWrapper<M, T, R> {
+    mapper: M,
+    in_buf: Vec<Channeled<T>>,
+    out_buf: Vec<R>,
+}
+
+impl<T, R, M> FramedMapper<T, R> for ChanneledMapperWrapper<M, T, R>
+where
+    M: FramedMapper<Channeled<T>, Channeled<R>>,
+    T: Copy,
+    R: Copy,
+{
+    fn map<'a>(&'a mut self, input: &'a mut [T]) -> Result<Option<&'a mut [R]>> {
+        self.in_buf.clear();
+        self.in_buf
+            .extend(input.iter().copied().map(move |i| Channeled::Mono(i)));
+        if let Some(next) = self.mapper.map(&mut self.in_buf)? {
+            let out = &mut self.out_buf;
+            out.clear();
+
+            try_use_iter(
+                next.iter().map(move |v| match v {
+                    Channeled::Mono(v) => Ok(*v),
+                    _ => Err(anyhow::anyhow!("mono return from stereo data")),
+                }),
+                |itr| out.extend(itr),
+            )?;
+
+            Ok(Some(out.as_mut_slice()))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn map_frame_size(&self, orig: usize) -> usize {
+        self.mapper.map_frame_size(orig)
+    }
+}
+
+pub trait SplitChanneledFramedMapper<T, R>:
+    FramedMapper<Channeled<T>, Channeled<R>> + Sized
+{
+    fn split_channeled(self, cap: usize) -> ChanneledMapperWrapper<Self, T, R> {
+        let cap_mapped = self.map_frame_size(cap);
+        ChanneledMapperWrapper {
+            mapper: self,
+            in_buf: Vec::with_capacity(cap),
+            out_buf: Vec::with_capacity(cap_mapped),
+        }
+    }
+}
+
+impl<T, R, M> SplitChanneledFramedMapper<T, R> for M where
+    M: FramedMapper<Channeled<T>, Channeled<R>> + Sized
+{
 }

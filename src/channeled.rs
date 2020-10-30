@@ -1,6 +1,6 @@
 use anyhow::Result;
 use std::fmt;
-use std::iter::{Copied, FusedIterator, TrustedLen};
+use std::iter::{FusedIterator, TrustedLen};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Channeled<T> {
@@ -97,13 +97,12 @@ impl<T> Channeled<T> {
     }
 }
 
-impl<T> Channeled<Option<T>> {
-    pub fn flatten_option(self) -> Option<Channeled<T>> {
+impl Channeled<bool> {
+    pub fn and(self) -> bool {
         use Channeled::*;
         match self {
-            Stereo(Some(a), Some(b)) => Some(Stereo(a, b)),
-            Mono(Some(v)) => Some(Mono(v)),
-            _ => None,
+            Stereo(a, b) => a && b,
+            Mono(v) => v,
         }
     }
 }
@@ -156,16 +155,6 @@ where
             }
             Mono(v) => v.size_hint(),
         }
-    }
-}
-
-impl<'a, I, T: 'a> ChanneledIter<I>
-where
-    I: Iterator<Item = &'a T>,
-    T: Copy,
-{
-    pub fn copy_elements(self) -> ChanneledIter<Copied<I>> {
-        self.iters.map(move |itr| itr.copied()).into_iter()
     }
 }
 

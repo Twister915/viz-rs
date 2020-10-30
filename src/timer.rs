@@ -1,7 +1,7 @@
-use anyhow::Result;
+use crate::delegate_impls;
 use crate::framed::Framed;
 use crate::util::timed;
-use crate::delegate_impls;
+use anyhow::Result;
 use std::marker::PhantomData;
 
 pub struct FramedTimed<S, T> {
@@ -12,7 +12,10 @@ pub struct FramedTimed<S, T> {
     _in_typ: PhantomData<T>,
 }
 
-impl<S, T> FramedTimed<S, T> where S: Framed<T> {
+impl<S, T> FramedTimed<S, T>
+where
+    S: Framed<T>,
+{
     pub fn new(source: S, every_nth: usize) -> Self {
         Self {
             source,
@@ -23,7 +26,10 @@ impl<S, T> FramedTimed<S, T> where S: Framed<T> {
     }
 }
 
-impl<S, T> Framed<T> for FramedTimed<S, T> where S: Framed<T> {
+impl<S, T> Framed<T> for FramedTimed<S, T>
+where
+    S: Framed<T>,
+{
     fn seek_frame(&mut self, n: isize) -> Result<()> {
         self.source.seek_frame(n)
     }

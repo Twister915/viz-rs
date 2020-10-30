@@ -12,11 +12,11 @@ mod framed;
 mod player;
 mod savitzky_golay;
 mod sliding;
+mod timer;
 mod util;
 mod viz;
 mod wav;
 mod window;
-mod timer;
 
 fn main() {
     if let Some(target) = std::env::args().nth(1) {

@@ -1,8 +1,8 @@
-use crate::framed::{FramedMapper, MapperToChanneled};
+use crate::channeled::Channeled;
+use crate::framed::FramedMapper;
 use crate::util::log_timed;
 use anyhow::Result;
 use std::f64::consts::PI;
-use crate::channeled::Channeled;
 
 pub trait WindowingFunction {
     fn coefficient(idx: f64, count: f64) -> f64;
@@ -53,33 +53,11 @@ pub struct MemoizedWindowingMapper {
     coefficients: Vec<f64>,
 }
 
-impl FramedMapper<f64, f64> for MemoizedWindowingMapper {
-    fn map<'a>(&'a mut self, input: &'a mut [f64]) -> Result<Option<&'a mut [f64]>> {
-        input
-            .iter_mut()
-            .zip(self.coefficients.iter().copied())
-            .for_each(move |(v, cf)| *v *= cf);
-
-        Ok(Some(input))
-    }
-}
-
-impl MapperToChanneled<f64, f64> for MemoizedWindowingMapper {
-    type Channeled = MemoizedWindowingMapperChanneled;
-
-    fn into_channeled(self) -> Self::Channeled {
-        MemoizedWindowingMapperChanneled {
-            coefficients: self.coefficients,
-        }
-    }
-}
-
-pub struct MemoizedWindowingMapperChanneled {
-    coefficients: Vec<f64>
-}
-
-impl FramedMapper<Channeled<f64>, Channeled<f64>> for MemoizedWindowingMapperChanneled {
-    fn map<'a>(&'a mut self, input: &'a mut [Channeled<f64>]) -> Result<Option<&'a mut [Channeled<f64>]>> {
+impl FramedMapper<Channeled<f64>, Channeled<f64>> for MemoizedWindowingMapper {
+    fn map<'a>(
+        &'a mut self,
+        input: &'a mut [Channeled<f64>],
+    ) -> Result<Option<&'a mut [Channeled<f64>]>> {
         input
             .iter_mut()
             .zip(self.coefficients.iter().copied())

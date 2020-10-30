@@ -1,3 +1,4 @@
+use crate::channeled::Channeled;
 /// # Savitzky Golay Smoothing
 ///
 /// This smoothing algorthim is applied to a single frame of data, and will try to fit the curve of
@@ -68,12 +69,13 @@
 ///   but since we're multiplying and summing the data by these coefficients, and we don't want to
 ///   scale the input data at all, we must normalize each coefficient row so that it sums to 1.
 ///
-use crate::framed::{ChanneledMapperWrapper, FramedMapper, MapperToChanneled};
+use crate::framed::FramedMapper;
 use crate::util::log_timed;
 use anyhow::Result;
-use std::iter::{FusedIterator, TrustedLen};
+use itertools::Itertools;
 use num_rational::Rational64;
 use rayon::prelude::*;
+use std::iter::{FusedIterator, TrustedLen};
 
 // thanks to: https://github.com/arntanguy/gram_savitzky_golay/tree/master/src
 // thanks to: https://github.com/mirkov/savitzky-golay/blob/master/gram-poly.lisp
@@ -133,7 +135,11 @@ fn weights(m: i64, t: Rational64, n: Rational64, s: Rational64) -> Vec<Rational6
         .copied()
         .fold(0.into(), move |sm: Rational64, elem| sm + elem);
 
-    fracs.into_iter().map(move |f| (f / sum)).map(move |f| f.reduced()).collect()
+    fracs
+        .into_iter()
+        .map(move |f| (f / sum))
+        .map(move |f| f.reduced())
+        .collect()
 }
 
 #[derive(PartialEq, Eq, Debug, Copy, Clone, Hash)]
@@ -178,13 +184,13 @@ impl SavitzkyGolayConfig {
 
 #[derive(Debug)]
 pub struct SavitzkyGolayMapper {
-    buf: Vec<f64>,
+    buf: Vec<Channeled<f64>>,
     cap: usize,
     coefficients: Vec<Vec<Rational64>>,
 }
 
 impl SavitzkyGolayMapper {
-    pub fn new(size: usize, config: SavitzkyGolayConfig) -> SavitzkyGolayMapper {
+    fn new(size: usize, config: SavitzkyGolayConfig) -> Self {
         Self {
             buf: Vec::with_capacity(size),
             cap: size,
@@ -193,17 +199,16 @@ impl SavitzkyGolayMapper {
     }
 }
 
-impl FramedMapper<f64, f64> for SavitzkyGolayMapper {
-    fn map<'a>(&'a mut self, input: &'a mut [f64]) -> Result<Option<&'a mut [f64]>> {
+impl FramedMapper<Channeled<f64>, Channeled<f64>> for SavitzkyGolayMapper {
+    fn map<'a>(
+        &'a mut self,
+        input: &'a mut [Channeled<f64>],
+    ) -> Result<Option<&'a mut [Channeled<f64>]>> {
         let coefficients = self.coefficients.as_slice();
         let half_size = coefficients.len() / 2;
 
-        if self.buf.len() == input.len() {
-            self.buf.copy_from_slice(input)
-        } else {
-            self.buf.clear();
-            self.buf.extend_from_slice(input);
-        }
+        self.buf.clear();
+        self.buf.extend_from_slice(input);
 
         // convolution!
         // slides a window of fixed size along the input data
@@ -222,10 +227,14 @@ impl FramedMapper<f64, f64> for SavitzkyGolayMapper {
             .for_each(move |((data, coefficients), v)| {
                 *v = data
                     .iter()
-                    .copied()
-                    .zip(coefficients.iter().copied())
-                    .map(move |(i, cf)| multiply_rational_float(cf, i))
-                    .sum()
+                    .zip(coefficients.iter())
+                    .map(move |(v, cf)| v.map(move |v| multiply_rational_float(*cf, v)))
+                    .fold1(move |sum, next| {
+                        sum.zip(next)
+                            .expect("mixed mono/stereo?")
+                            .map(move |(s, n)| s + n)
+                    })
+                    .expect("empty data?")
             });
 
         Ok(Some(input))
@@ -234,13 +243,6 @@ impl FramedMapper<f64, f64> for SavitzkyGolayMapper {
 
 fn multiply_rational_float(ratio: Rational64, float: f64) -> f64 {
     (float * (*ratio.numer() as f64)) / (*ratio.denom() as f64)
-}
-
-impl MapperToChanneled<f64, f64> for SavitzkyGolayMapper {
-    fn into_channeled(self) -> ChanneledMapperWrapper<Self, f64, f64> {
-        let cap = self.cap;
-        self.channeled(cap)
-    }
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -312,5 +314,7 @@ impl Iterator for SlidingWindow {
 }
 
 unsafe impl TrustedLen for SlidingWindow {}
+
 impl ExactSizeIterator for SlidingWindow {}
+
 impl FusedIterator for SlidingWindow {}
