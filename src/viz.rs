@@ -24,9 +24,9 @@ use std::time::{Duration, Instant};
 const FPS: u64 = 60;
 
 #[cfg(not(debug_assertions))]
-const FPS: u64 = 160;
+const FPS: u64 = 150;
 
-const DATA_WINDOW_MS: u64 = 100;
+const DATA_WINDOW_MS: u64 = 70;
 
 pub fn visualize(file: &str) -> Result<()> {
     let sdl_context = sdl2::init().map_err(map_sdl_err)?;
@@ -140,7 +140,7 @@ pub fn visualize(file: &str) -> Result<()> {
     }
 }
 
-const ALPHA0: f64 = 0.80;
+const ALPHA0: f64 = 0.75;
 const ALPHA1: f64 = 0.60;
 
 fn create_data_src(file: &str) -> Result<(impl Framed<f64>, WavFile)> {
@@ -166,8 +166,8 @@ fn create_data_src(file: &str) -> Result<(impl Framed<f64>, WavFile)> {
         .lift(move |_| ExponentialSmoothing::new(SEEK_BACK_LIMIT, ALPHA0))
         .lift(move |size| {
             SavitzkyGolayConfig {
-                window_size: 47,
-                degree: 8,
+                window_size: 37,
+                degree: 7,
                 order: 0,
             }
             .into_mapper(size)
@@ -185,13 +185,13 @@ fn create_data_src(file: &str) -> Result<(impl Framed<f64>, WavFile)> {
         })
         .map_mut(channeled_map_mut(to_db))
         .map_mut(channeled_map_mut(move |v| {
-            normalize_between(v, -35.0, -8.5)
+            normalize_between(v, -35.0, -5.5)
         }))
         .map_mut(channeled_map_mut(normalize_infs))
         .lift(move |size| {
             SavitzkyGolayConfig {
-                window_size: 7,
-                degree: 2,
+                window_size: 9,
+                degree: 3,
                 order: 0,
             }
             .into_mapper(size)

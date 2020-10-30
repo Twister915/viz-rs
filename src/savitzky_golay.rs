@@ -123,7 +123,7 @@ fn weight(i: Rational64, t: Rational64, m: Rational64, n: Rational64, s: Rationa
     w
 }
 
-fn weights(m: i64, t: Rational64, n: Rational64, s: Rational64) -> Vec<Rational64> {
+fn weights(m: i64, t: Rational64, n: Rational64, s: Rational64) -> Vec<(f64, f64)> {
     let count = (2 * m) + 1;
     let fracs = (0..count)
         .into_par_iter()
@@ -139,6 +139,7 @@ fn weights(m: i64, t: Rational64, n: Rational64, s: Rational64) -> Vec<Rational6
         .into_iter()
         .map(move |f| (f / sum))
         .map(move |f| f.reduced())
+        .map(move |f| (*f.numer() as f64, *f.denom() as f64))
         .collect()
 }
 
@@ -157,7 +158,7 @@ impl SavitzkyGolayConfig {
         SavitzkyGolayMapper::new(size, self)
     }
 
-    pub fn compute_coefficients(&self) -> Vec<Vec<Rational64>> {
+    pub fn compute_coefficients(&self) -> Vec<Vec<(f64, f64)>> {
         if self.window_size % 2 == 0 || self.window_size < 3 {
             panic!("invalid window size {}", self.window_size)
         }
@@ -186,7 +187,7 @@ impl SavitzkyGolayConfig {
 pub struct SavitzkyGolayMapper {
     buf: Vec<Channeled<f64>>,
     cap: usize,
-    coefficients: Vec<Vec<Rational64>>,
+    coefficients: Vec<Vec<(f64, f64)>>,
 }
 
 impl SavitzkyGolayMapper {
@@ -228,7 +229,7 @@ impl FramedMapper<Channeled<f64>, Channeled<f64>> for SavitzkyGolayMapper {
                 *v = data
                     .iter()
                     .zip(coefficients.iter())
-                    .map(move |(v, cf)| v.map(move |v| multiply_rational_float(*cf, v)))
+                    .map(move |(v, cf)| v.map(move |v| multiply_rational_float(cf, v)))
                     .fold1(move |sum, next| {
                         sum.zip(next)
                             .expect("mixed mono/stereo?")
@@ -241,8 +242,8 @@ impl FramedMapper<Channeled<f64>, Channeled<f64>> for SavitzkyGolayMapper {
     }
 }
 
-fn multiply_rational_float(ratio: Rational64, float: f64) -> f64 {
-    (float * (*ratio.numer() as f64)) / (*ratio.denom() as f64)
+fn multiply_rational_float((numer, denom): &(f64, f64), float: f64) -> f64 {
+    (float * *numer) / *denom
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
