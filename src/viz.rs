@@ -26,7 +26,7 @@ const FPS: u64 = 60;
 #[cfg(not(debug_assertions))]
 const FPS: u64 = 150;
 
-const DATA_WINDOW_MS: u64 = 92;
+const DATA_WINDOW_MS: u64 = 98;
 
 pub fn visualize(file: &str) -> Result<()> {
     let sdl_context = sdl2::init().map_err(map_sdl_err)?;
@@ -166,8 +166,8 @@ fn create_data_src(file: &str) -> Result<(impl Framed<f64>, WavFile)> {
         .lift(move |_| ExponentialSmoothing::new(SEEK_BACK_LIMIT, ALPHA0))
         .lift(move |size| {
             SavitzkyGolayConfig {
-                window_size: 79,
-                degree: 7,
+                window_size: 37,
+                degree: 6,
                 order: 0,
             }
             .into_mapper(size)
@@ -185,16 +185,16 @@ fn create_data_src(file: &str) -> Result<(impl Framed<f64>, WavFile)> {
         })
         .map_mut(channeled_map_mut(to_db))
         .map_mut(channeled_map_mut(move |v| {
-            normalize_between(v, -35.0, -5.5)
+            normalize_between(v, -35.0, -10.5)
         }))
         .map_mut(channeled_map_mut(normalize_infs))
         .lift(move |size| {
             SavitzkyGolayConfig {
                 // if you want a different vibe:
-                // window_size: 49,
-                // degree: 9,
-                window_size: 13,
-                degree: 5,
+                window_size: 49,
+                degree: 9,
+                // window_size: 13,
+                // degree: 5,
                 order: 0,
             }
             .into_mapper(size)
