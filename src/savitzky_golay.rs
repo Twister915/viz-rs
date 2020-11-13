@@ -124,23 +124,12 @@ fn weight(i: Rational64, t: Rational64, m: Rational64, n: Rational64, s: Rationa
 }
 
 fn weights(m: i64, t: Rational64, n: Rational64, s: Rational64) -> Vec<(f64, f64)> {
-    let count = (2 * m) + 1;
-    let fracs = (0..count)
+    (0..((2 * m) + 1))
         .into_par_iter()
         .map(move |i| weight(((i - m) as i64).into(), t, (m as i64).into(), n, s))
-        .collect::<Vec<_>>();
-
-    let sum = fracs
-        .iter()
-        .copied()
-        .fold(0.into(), move |sm: Rational64, elem| sm + elem);
-
-    fracs
-        .into_iter()
-        .map(move |f| (f / sum))
         .map(move |f| f.reduced())
         .map(move |f| (*f.numer() as f64, *f.denom() as f64))
-        .collect()
+        .collect::<Vec<_>>()
 }
 
 #[derive(PartialEq, Eq, Debug, Copy, Clone, Hash)]

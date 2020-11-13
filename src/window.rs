@@ -2,7 +2,8 @@ use crate::channeled::Channeled;
 use crate::framed::FramedMapper;
 use crate::util::log_timed;
 use anyhow::Result;
-use std::f64::consts::PI;
+use itertools::Itertools;
+use std::f64::consts::TAU;
 
 pub trait WindowingFunction {
     fn coefficient(idx: f64, count: f64) -> f64;
@@ -12,16 +13,15 @@ pub trait WindowingFunction {
     }
 
     fn mapper(size: usize) -> MemoizedWindowingMapper {
+        let sz = size as f64;
         log_timed(
             format!("compute windowing function values for size {}", size),
             || MemoizedWindowingMapper {
-                coefficients: {
-                    let mut out = Vec::with_capacity(size);
-                    for i in 0..size {
-                        out.push(Self::coefficient(i as f64, size as f64));
-                    }
-                    out
-                },
+                coefficients: (0..size)
+                    .into_iter()
+                    .map(move |i| i as f64)
+                    .map(move |i| Self::coefficient(i, sz))
+                    .collect_vec(),
             },
         )
     }
@@ -36,12 +36,11 @@ impl WindowingFunction for BlackmanNuttall {
         const A1: f64 = 0.4891775;
         const A2: f64 = 0.1365995;
         const A3: f64 = 0.0106411;
-        const TWOPI: f64 = PI * 2.0;
-        const FOURPI: f64 = PI * 4.0;
-        const SIXPI: f64 = PI * 6.0;
+        const FOURPI: f64 = TAU * 2.0;
+        const SIXPI: f64 = FOURPI + TAU;
 
         let count_minus_one = count - 1.0;
-        let a1t = A1 * f64::cos((TWOPI * idx) / count_minus_one);
+        let a1t = A1 * f64::cos((TAU * idx) / count_minus_one);
         let a2t = A2 * f64::cos((FOURPI * idx) / count_minus_one);
         let a3t = A3 * f64::cos((SIXPI * idx) / count_minus_one);
 
@@ -60,8 +59,8 @@ impl FramedMapper<Channeled<f64>, Channeled<f64>> for MemoizedWindowingMapper {
     ) -> Result<Option<&'a mut [Channeled<f64>]>> {
         input
             .iter_mut()
-            .zip(self.coefficients.iter().copied())
-            .for_each(move |(v, cf)| v.as_mut_ref().for_each(move |v| *v = cf * *v));
+            .zip(self.coefficients.iter())
+            .for_each(move |(v, cf)| v.as_mut_ref().for_each(move |v| *v *= *cf));
 
         Ok(Some(input))
     }

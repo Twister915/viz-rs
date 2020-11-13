@@ -21,7 +21,7 @@ use std::ops::{Add, Sub};
 use std::time::{Duration, Instant};
 
 #[cfg(debug_assertions)]
-const FPS: u64 = 60;
+const FPS: u64 = 90;
 
 #[cfg(not(debug_assertions))]
 const FPS: u64 = 150;
@@ -148,7 +148,9 @@ fn create_data_src(file: &str) -> Result<(impl Framed<f64>, WavFile)> {
     const BUF_SIZE: usize = 32768;
 
     let frame_src = WavFile::open(file, BUF_SIZE)?
+        // change RawSample to f64
         .map(move |v| v.map(move |c| c.into()))
+        // sliding frames of data
         .compose(move |wav| {
             let frame_size = wav.samples_from_dur(Duration::from_millis(DATA_WINDOW_MS));
             let sample_rate: Rational64 = (wav.sample_rate() as i64).into();
@@ -161,9 +163,13 @@ fn create_data_src(file: &str) -> Result<(impl Framed<f64>, WavFile)> {
             );
             SlidingFrame::new(wav, frame_size, frame_stride)
         })
+        // blackman nuttall window
         .lift(move |size| BlackmanNuttall::mapper(size))
+        // FFT
         .try_lift(move |size| FramedFft::new(size))?
+        // time smoothing
         .lift(move |_| ExponentialSmoothing::new(SEEK_BACK_LIMIT, ALPHA0))
+        // nearby bars smoothing Savitzky Golay
         .lift(move |size| {
             SavitzkyGolayConfig {
                 window_size: 37,
@@ -172,6 +178,7 @@ fn create_data_src(file: &str) -> Result<(impl Framed<f64>, WavFile)> {
             }
             .into_mapper(size)
         })
+        // bin the FFT output into a smaller number of bars
         .compose(move |source| {
             let config = BinConfig {
                 bins: 49,
@@ -183,11 +190,15 @@ fn create_data_src(file: &str) -> Result<(impl Framed<f64>, WavFile)> {
             };
             source.apply_mapper(Binner::new(config))
         })
+        // dB conversion
         .map_mut(channeled_map_mut(to_db))
+        // clamp between min/max dB -> (0, 1)
         .map_mut(channeled_map_mut(move |v| {
-            normalize_between(v, -35.0, -10.5)
+            normalize_between(v, -29.0, -8.5)
         }))
+        // normalize infinities and NaNs
         .map_mut(channeled_map_mut(normalize_infs))
+        // more savitzky golay smoothing after binning
         .lift(move |size| {
             SavitzkyGolayConfig {
                 // if you want a different vibe:
@@ -199,9 +210,15 @@ fn create_data_src(file: &str) -> Result<(impl Framed<f64>, WavFile)> {
             }
             .into_mapper(size)
         })
+        // keep smooth data inside (0, 1)
         .map_mut(channeled_map_mut(constrain_normalized))
+        // time smoothing again
         .lift(move |_| ExponentialSmoothing::new(SEEK_BACK_LIMIT, ALPHA1))
+        // Channeled data to single value per bar
         .map(flatten_channels)
+        // 48 distinct "levels" each bar can take on
+        .map_mut(discrete_levels(48))
+        // time the frames and log it
         .compose(move |frames| FramedTimed::new(frames, 1024));
 
     Ok((frame_src, WavFile::open(file, BUF_SIZE)?))
@@ -305,4 +322,9 @@ fn flatten_channels(input: &Channeled<f64>) -> f64 {
         Stereo(a, b) => (a + b) / 2.0,
         Mono(v) => v,
     }
+}
+
+fn discrete_levels(levels: u32) -> impl FnMut(&mut f64) {
+    let levels = levels as f64;
+    move |v| *v = (*v * levels).floor() / levels
 }
