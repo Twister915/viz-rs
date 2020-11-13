@@ -1,4 +1,3 @@
-use crate::channeled::Channeled;
 /// # Savitzky Golay Smoothing
 ///
 /// This smoothing algorthim is applied to a single frame of data, and will try to fit the curve of
@@ -69,12 +68,14 @@ use crate::channeled::Channeled;
 ///   but since we're multiplying and summing the data by these coefficients, and we don't want to
 ///   scale the input data at all, we must normalize each coefficient row so that it sums to 1.
 ///
+use crate::channeled::Channeled;
 use crate::framed::FramedMapper;
 use crate::util::log_timed;
 use anyhow::Result;
 use itertools::Itertools;
 use num_rational::Rational64;
 use rayon::prelude::*;
+use serde::Deserialize;
 use std::iter::{FusedIterator, TrustedLen};
 
 // thanks to: https://github.com/arntanguy/gram_savitzky_golay/tree/master/src
@@ -132,7 +133,7 @@ fn weights(m: i64, t: Rational64, n: Rational64, s: Rational64) -> Vec<(f64, f64
         .collect::<Vec<_>>()
 }
 
-#[derive(PartialEq, Eq, Debug, Copy, Clone, Hash)]
+#[derive(PartialEq, Eq, Debug, Copy, Clone, Hash, Deserialize)]
 pub struct SavitzkyGolayConfig {
     /// The number of coefficients to compute (the number of nearby points to convolve when computing any given point)
     pub window_size: u64,

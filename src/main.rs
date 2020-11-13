@@ -9,6 +9,7 @@ mod channeled;
 mod exponential_smoothing;
 mod fft;
 mod framed;
+mod pipeline;
 mod player;
 mod savitzky_golay;
 mod sliding;

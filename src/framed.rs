@@ -5,8 +5,11 @@ use num_rational::Rational64;
 use std::marker::PhantomData;
 use std::time::Duration;
 
-pub trait Framed<E> {
-    fn apply_mapper<M, R>(self, mapper: M) -> MappedFramed<Self, M, E, R>
+pub trait Framed<E, I> {
+
+    fn into_deep_inner(self) -> I;
+
+    fn apply_mapper<M, R>(self, mapper: M) -> MappedFramed<Self, M, E, R, I>
     where
         Self: Sized,
         M: FramedMapper<E, R>,
@@ -16,10 +19,11 @@ pub trait Framed<E> {
             mapper,
             _src_typ: PhantomData,
             _dst_typ: PhantomData,
+            _inner_typ: PhantomData,
         }
     }
 
-    fn lift<F, M, R>(self, factory: F) -> MappedFramed<Self, M, E, R>
+    fn lift<F, M, R>(self, factory: F) -> MappedFramed<Self, M, E, R, I>
     where
         Self: Sized,
         F: FnOnce(usize) -> M,
@@ -29,7 +33,7 @@ pub trait Framed<E> {
         self.apply_mapper(factory(size))
     }
 
-    fn try_lift<F, M, X, R>(self, factory: F) -> Result<MappedFramed<Self, M, E, R>, X>
+    fn try_lift<F, M, X, R>(self, factory: F) -> Result<MappedFramed<Self, M, E, R, I>, X>
     where
         Self: Sized,
         F: FnOnce(usize) -> Result<M, X>,
@@ -69,7 +73,7 @@ pub trait Framed<E> {
 
     fn full_frame_size(&self) -> usize;
 
-    fn map<F, R>(self, mapper: F) -> MappedFramed<Self, FramedMapFn<E, R, F>, E, R>
+    fn map<F, R>(self, mapper: F) -> MappedFramed<Self, FramedMapFn<E, R, F>, E, R, I>
     where
         Self: Sized,
         F: Fn(&E) -> R,
@@ -81,7 +85,7 @@ pub trait Framed<E> {
         })
     }
 
-    fn map_mut<F>(self, mapper: F) -> MappedFramed<Self, FramedMutMapFn<E, F>, E, E>
+    fn map_mut<F>(self, mapper: F) -> MappedFramed<Self, FramedMutMapFn<E, F>, E, E, I>
     where
         Self: Sized,
         F: FnMut(&mut E) -> (),
@@ -106,7 +110,10 @@ pub trait Framed<E> {
     }
 }
 
-pub trait Samples<T>: Sampled {
+pub trait Samples<T, I>: Sampled {
+
+    fn into_deep_inner(self) -> I;
+
     fn compose<F, O>(self, f: F) -> O
     where
         F: FnOnce(Self) -> O,
@@ -125,7 +132,7 @@ pub trait Samples<T>: Sampled {
         self.num_samples_remain() != 0
     }
 
-    fn map<F, R>(self, mapper: F) -> MappedSamples<Self, F, T, R>
+    fn map<F, R>(self, mapper: F) -> MappedSamples<Self, F, T, R, I>
     where
         Self: Sized,
         F: Fn(T) -> R,
@@ -225,18 +232,24 @@ where
     }
 }
 
-pub struct MappedFramed<S, M, T, R> {
+pub struct MappedFramed<S, M, T, R, I> {
     source: S,
     mapper: M,
     _src_typ: PhantomData<T>,
     _dst_typ: PhantomData<R>,
+    _inner_typ: PhantomData<I>,
 }
 
-impl<S, M, T, R> Framed<R> for MappedFramed<S, M, T, R>
+impl<S, M, T, R, I> Framed<R, I> for MappedFramed<S, M, T, R, I>
 where
-    S: Framed<T>,
+    S: Framed<T, I>,
     M: FramedMapper<T, R>,
 {
+    fn into_deep_inner(self) -> I {
+        self.source.into_deep_inner()
+    }
+
+
     fn seek_frame(&mut self, n: isize) -> Result<()> {
         self.source.seek_frame(n)
     }
@@ -266,19 +279,20 @@ where
     }
 }
 
-delegate_impls!(MappedFramed<S, M, T, R>, S, source);
+delegate_impls!(MappedFramed<S, M, T, R, I>, S, source);
 
-pub struct MappedSamples<S, M, T, R> {
+pub struct MappedSamples<S, M, T, R, I> {
     source: S,
     mapper: M,
 
     _src_typ: PhantomData<T>,
     _dst_typ: PhantomData<R>,
+    _inner_typ: PhantomData<I>,
 }
 
-impl<S, M, T, R> MappedSamples<S, M, T, R>
+impl<S, M, T, R, I> MappedSamples<S, M, T, R, I>
 where
-    S: Samples<T> + Sampled,
+    S: Samples<T, I> + Sampled,
     M: Fn(T) -> R,
 {
     pub fn new(source: S, mapper: M) -> Self {
@@ -287,17 +301,22 @@ where
             mapper,
             _src_typ: PhantomData,
             _dst_typ: PhantomData,
+            _inner_typ: PhantomData,
         }
     }
 }
 
-delegate_impls!(MappedSamples<S, M, T, R>, S, source);
+delegate_impls!(MappedSamples<S, M, T, R, I>, S, source);
 
-impl<S, M, T, R> Samples<R> for MappedSamples<S, M, T, R>
+impl<S, M, T, R, I> Samples<R, I> for MappedSamples<S, M, T, R, I>
 where
-    S: Samples<T> + Sampled,
+    S: Samples<T, I> + Sampled,
     M: Fn(T) -> R,
 {
+    fn into_deep_inner(self) -> I {
+        return self.source.into_deep_inner()
+    }
+
     fn seek_samples(&mut self, n: isize) -> Result<()> {
         self.source.seek_samples(n)
     }

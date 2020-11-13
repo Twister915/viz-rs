@@ -2,18 +2,20 @@ use crate::delegate_impls;
 use crate::framed::{Framed, Samples};
 use crate::util::try_use_iter;
 use anyhow::Result;
+use serde::export::PhantomData;
 
-pub struct SlidingFrame<S, T> {
+pub struct SlidingFrame<S, T, I> {
     source: S,
     buf: Vec<T>,
     cur_buf: Vec<T>,
     size: usize,
     stride: usize,
+    _inner_typ: PhantomData<I>,
 }
 
-impl<S, T> SlidingFrame<S, T>
+impl<S, T, I> SlidingFrame<S, T, I>
 where
-    S: Samples<T>,
+    S: Samples<T, I>,
 {
     pub fn new(source: S, size: usize, mut stride: usize) -> Self {
         if stride == 0 {
@@ -25,15 +27,20 @@ where
             cur_buf: Vec::with_capacity(size),
             size,
             stride,
+            _inner_typ: PhantomData,
         }
     }
 }
 
-impl<S, T> Framed<T> for SlidingFrame<S, T>
+impl<S, T, I> Framed<T, I> for SlidingFrame<S, T, I>
 where
-    S: Samples<T>,
+    S: Samples<T, I>,
     T: Copy,
 {
+    fn into_deep_inner(self) -> I {
+        self.source.into_deep_inner()
+    }
+
     fn seek_frame(&mut self, n: isize) -> Result<()> {
         if n < 0 {
             let buf_len = self.buf.len();
@@ -94,11 +101,11 @@ where
     }
 }
 
-delegate_impls!(SlidingFrame<S, T>, S, source);
+delegate_impls!(SlidingFrame<S, T, I>, S, source);
 
-impl<S, T> SlidingFrame<S, T>
+impl<S, T, I> SlidingFrame<S, T, I>
 where
-    S: Samples<T>,
+    S: Samples<T, I>,
     T: Copy,
 {
     fn ensure_buf_filled(&mut self) -> Result<()> {

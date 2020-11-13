@@ -1,17 +1,9 @@
-use crate::binner::{BinConfig, Binner};
-use crate::channeled::Channeled;
-use crate::exponential_smoothing::ExponentialSmoothing;
-use crate::fft::FramedFft;
-use crate::framed::{Framed, Sampled, Samples};
+use crate::framed::Framed;
+use crate::pipeline::{create_viz_pipeline, open_config_or_default, VizPipelineConfig};
 use crate::player::WavPlayer;
-use crate::savitzky_golay::SavitzkyGolayConfig;
-use crate::sliding::SlidingFrame;
-use crate::timer::FramedTimed;
 use crate::util::log_timed;
 use crate::wav::WavFile;
-use crate::window::{BlackmanNuttall, WindowingFunction};
 use anyhow::Result;
-use num_rational::Rational64;
 use sdl2::event::Event;
 use sdl2::keyboard::Keycode;
 use sdl2::pixels::Color;
@@ -19,14 +11,6 @@ use sdl2::rect::Rect;
 use sdl2::render::WindowCanvas;
 use std::ops::{Add, Sub};
 use std::time::{Duration, Instant};
-
-#[cfg(debug_assertions)]
-const FPS: u64 = 90;
-
-#[cfg(not(debug_assertions))]
-const FPS: u64 = 150;
-
-const DATA_WINDOW_MS: u64 = 98;
 
 pub fn visualize(file: &str) -> Result<()> {
     let sdl_context = sdl2::init().map_err(map_sdl_err)?;
@@ -40,7 +24,7 @@ pub fn visualize(file: &str) -> Result<()> {
     canvas.clear();
     canvas.present();
 
-    let (mut frames, wav_src) = log_timed(
+    let (mut frames, config, wav_src) = log_timed(
         format!("setup visualizer math pipeline for {}", file),
         || create_data_src(file),
     )?;
@@ -51,8 +35,8 @@ pub fn visualize(file: &str) -> Result<()> {
     wav_player.play()?;
     let mut paused = false;
     let mut last_frame_for_ts: Option<Instant> = None;
-    let frame_delta = Duration::new(0, (1_000_000_000u64 / FPS) as u32);
-    let frame_for_offset = Duration::from_millis(DATA_WINDOW_MS / 2);
+    let frame_delta = Duration::new(0, (1_000_000_000u64 / config.fps) as u32);
+    let frame_for_offset = config.data_window() / 2;
     // frame_for_offset += frame_delta.mul_f64(alpha_frame_offset());
     loop {
         let now = Instant::now();
@@ -140,130 +124,12 @@ pub fn visualize(file: &str) -> Result<()> {
     }
 }
 
-const ALPHA0: f64 = 0.75;
-const ALPHA1: f64 = 0.60;
-
-fn create_data_src(file: &str) -> Result<(impl Framed<f64>, WavFile)> {
-    const SEEK_BACK_LIMIT: usize = 1;
+fn create_data_src(file: &str) -> Result<(impl Framed<f64, WavFile>, VizPipelineConfig, WavFile)> {
     const BUF_SIZE: usize = 32768;
 
-    let frame_src = WavFile::open(file, BUF_SIZE)?
-        // change RawSample to f64
-        .map(move |v| v.map(move |c| c.into()))
-        // sliding frames of data
-        .compose(move |wav| {
-            let frame_size = wav.samples_from_dur(Duration::from_millis(DATA_WINDOW_MS));
-            let sample_rate: Rational64 = (wav.sample_rate() as i64).into();
-            let frame_rate = Rational64::new_raw(1, FPS as i64);
-            let frame_stride = frame_rate * sample_rate;
-            let frame_stride = *frame_stride.round().numer() as usize;
-            println!(
-                "sliding window: stride={}, size={}",
-                frame_stride, frame_size
-            );
-            SlidingFrame::new(wav, frame_size, frame_stride)
-        })
-        // blackman nuttall window
-        .lift(move |size| BlackmanNuttall::mapper(size))
-        // FFT
-        .try_lift(move |size| FramedFft::new(size))?
-        // time smoothing
-        .lift(move |_| ExponentialSmoothing::new(SEEK_BACK_LIMIT, ALPHA0))
-        // nearby bars smoothing Savitzky Golay
-        .lift(move |size| {
-            SavitzkyGolayConfig {
-                window_size: 37,
-                degree: 6,
-                order: 0,
-            }
-            .into_mapper(size)
-        })
-        // bin the FFT output into a smaller number of bars
-        .compose(move |source| {
-            let config = BinConfig {
-                bins: 49,
-                fmin: 42.0,
-                fmax: 16000.0,
-                gamma: 2.3,
-                input_size: source.full_frame_size(),
-                sample_rate: source.sample_rate(),
-            };
-            source.apply_mapper(Binner::new(config))
-        })
-        // dB conversion
-        .map_mut(channeled_map_mut(to_db))
-        // clamp between min/max dB -> (0, 1)
-        .map_mut(channeled_map_mut(move |v| {
-            normalize_between(v, -29.0, -8.5)
-        }))
-        // normalize infinities and NaNs
-        .map_mut(channeled_map_mut(normalize_infs))
-        // more savitzky golay smoothing after binning
-        .lift(move |size| {
-            SavitzkyGolayConfig {
-                // if you want a different vibe:
-                window_size: 49,
-                degree: 9,
-                // window_size: 13,
-                // degree: 5,
-                order: 0,
-            }
-            .into_mapper(size)
-        })
-        // keep smooth data inside (0, 1)
-        .map_mut(channeled_map_mut(constrain_normalized))
-        // time smoothing again
-        .lift(move |_| ExponentialSmoothing::new(SEEK_BACK_LIMIT, ALPHA1))
-        // Channeled data to single value per bar
-        .map(flatten_channels)
-        // 48 distinct "levels" each bar can take on
-        .map_mut(discrete_levels(48))
-        // time the frames and log it
-        .compose(move |frames| FramedTimed::new(frames, 1024));
-
-    Ok((frame_src, WavFile::open(file, BUF_SIZE)?))
-}
-
-fn to_db(v: &mut f64) {
-    *v = 20.0 * v.log10();
-}
-
-fn normalize_between(v: &mut f64, min: f64, max: f64) {
-    let vv = *v;
-    if vv < min {
-        *v = 0.0;
-    } else if vv > max {
-        *v = 1.0;
-    } else {
-        *v = (vv - min) / (max - min);
-    }
-}
-
-fn normalize_infs(v: &mut f64) {
-    let vv = *v;
-    if v.is_nan() || vv == f64::NEG_INFINITY {
-        *v = 0.0;
-    } else if vv == f64::INFINITY {
-        *v = 1.0;
-    }
-}
-
-fn constrain_normalized(v: &mut f64) {
-    let vv = *v;
-    if vv > 1.0 {
-        *v = 1.0;
-    } else if vv < 0.0 {
-        *v = 0.0;
-    }
-}
-
-fn channeled_map_mut<F, T>(mut f: F) -> impl FnMut(&mut Channeled<T>)
-where
-    F: FnMut(&mut T),
-{
-    move |input| {
-        input.as_mut_ref().for_each(&mut f);
-    }
+    let config = open_config_or_default()?;
+    let frame_src = create_viz_pipeline(WavFile::open(file, BUF_SIZE)?, config)?;
+    Ok((frame_src, config, WavFile::open(file, BUF_SIZE)?))
 }
 
 fn draw_frame(canvas: &mut WindowCanvas, frame: &[f64]) -> Result<()> {
@@ -314,17 +180,4 @@ fn draw_frame(canvas: &mut WindowCanvas, frame: &[f64]) -> Result<()> {
 
 fn map_sdl_err(err: String) -> anyhow::Error {
     anyhow::anyhow!("sdl2: {}", err)
-}
-
-fn flatten_channels(input: &Channeled<f64>) -> f64 {
-    use Channeled::*;
-    match *input {
-        Stereo(a, b) => (a + b) / 2.0,
-        Mono(v) => v,
-    }
-}
-
-fn discrete_levels(levels: u32) -> impl FnMut(&mut f64) {
-    let levels = levels as f64;
-    move |v| *v = (*v * levels).floor() / levels
 }

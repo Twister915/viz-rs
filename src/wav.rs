@@ -189,7 +189,11 @@ impl WavFile {
     }
 }
 
-impl Samples<Channeled<SampleRaw>> for WavFile {
+impl Samples<Channeled<SampleRaw>, WavFile> for WavFile {
+    fn into_deep_inner(self) -> WavFile {
+        self
+    }
+
     fn seek_samples(&mut self, n: isize) -> Result<(), Error> {
         let new_sample_at = (self.sample_at as isize) + n;
         if !self.does_sample_exist(new_sample_at) {

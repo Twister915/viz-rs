@@ -1,0 +1,26 @@
+fps: 150
+
+data_window_ms: 98
+
+alpha0: 0.75
+alpha1: 0.65
+
+smoothing0:
+  window_size: 37
+  degree: 6
+  order: 0
+
+smoothing1:
+  window_size: 49
+  degree: 9
+  order: 0
+
+binning:
+  bins: 49
+  fmin: 42.0
+  fmax: 16000.0
+  gamma: 2.3
+  discrete_levels: 48
+
+min_db: -29.0
+max_db: -8.5
