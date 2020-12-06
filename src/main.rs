@@ -2,6 +2,13 @@
 #![feature(trusted_len)]
 #![feature(associated_type_defaults)]
 
+#[cfg(not(target_env = "msvc"))]
+use jemallocator::Jemalloc;
+
+#[cfg(not(target_env = "msvc"))]
+#[global_allocator]
+static GLOBAL: Jemalloc = Jemalloc;
+
 use crate::viz::visualize;
 
 mod binner;

@@ -1,21 +1,21 @@
 use crate::channeled::Channeled;
 use crate::framed::FramedMapper;
-use crate::util::{log_timed, slice_copy_from};
+use crate::util::{log_timed, slice_copy_from, VizFloat, VizComplex, VizFftPlan};
 use anyhow::{anyhow, Result};
 use fftw::array::AlignedVec;
-use fftw::plan::{R2CPlan, R2CPlan64};
-use fftw::types::{c64, Flag};
+use fftw::plan::R2CPlan;
+use fftw::types::Flag;
 
 pub struct FramedFft {
-    plan: R2CPlan64,
+    plan: VizFftPlan,
     bufs: Option<Channeled<Bufs>>,
     n_out: usize,
     n_in: usize,
 }
 
 struct Bufs {
-    input: AlignedVec<f64>,
-    output: AlignedVec<c64>,
+    input: AlignedVec<VizFloat>,
+    output: AlignedVec<VizComplex>,
 }
 
 impl Bufs {
@@ -34,7 +34,7 @@ impl FramedFft {
         // DC at index 0 so N / 2
         let n_out = cap / 2;
         let plan = log_timed(format!("plan fft for size {}", cap), || {
-            R2CPlan64::aligned(&[cap], Flag::ESTIMATE | Flag::DESTROYINPUT).map_err(map_fftw_error)
+            VizFftPlan::aligned(&[cap], Flag::ESTIMATE | Flag::DESTROYINPUT).map_err(map_fftw_error)
         })?;
         Ok(Self {
             plan,
@@ -45,11 +45,11 @@ impl FramedFft {
     }
 }
 
-impl FramedMapper<Channeled<f64>, Channeled<f64>> for FramedFft {
+impl FramedMapper<Channeled<VizFloat>, Channeled<VizFloat>> for FramedFft {
     fn map<'a>(
         &'a mut self,
-        input: &'a mut [Channeled<f64>],
-    ) -> Result<Option<&'a mut [Channeled<f64>]>> {
+        input: &'a mut [Channeled<VizFloat>],
+    ) -> Result<Option<&'a mut [Channeled<VizFloat>]>> {
         // lazily setup the bufs
         let bufs = if let Some(buf) = self.bufs.as_mut() {
             buf
@@ -63,11 +63,11 @@ impl FramedMapper<Channeled<f64>, Channeled<f64>> for FramedFft {
 
         // load input into the buffers:
         bufs.as_mut_ref()
-            .map(move |v| v.input.iter_mut()) // Channeled<IterMut<f64>>
-            .into_iter() // Iter<Channeled<&mut f64>> basically
-            .zip(input.iter()) // Iter<(Channeled<&mut f64>, Channeled<f64>)>
+            .map(move |v| v.input.iter_mut()) // Channeled<IterMut<VizFloat>>
+            .into_iter() // Iter<Channeled<&mut VizFloat>> basically
+            .zip(input.iter()) // Iter<(Channeled<&mut VizFloat>, Channeled<VizFloat>)>
             .for_each(move |(dest, input)| {
-                dest.zip(input.as_ref()) // Channeled<(&mut f64, f64)>
+                dest.zip(input.as_ref()) // Channeled<(&mut VizFloat, VizFloat)>
                     .expect("mixed mono/stereo?")
                     .for_each(move |(d, i)| *d = *i)
             });

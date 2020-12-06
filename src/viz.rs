@@ -1,7 +1,7 @@
 use crate::framed::Framed;
 use crate::pipeline::{create_viz_pipeline, open_config_or_default, VizPipelineConfig};
 use crate::player::WavPlayer;
-use crate::util::log_timed;
+use crate::util::{log_timed, VizFloat};
 use crate::wav::WavFile;
 use anyhow::Result;
 use sdl2::event::Event;
@@ -37,7 +37,6 @@ pub fn visualize(file: &str) -> Result<()> {
     let mut last_frame_for_ts: Option<Instant> = None;
     let frame_delta = Duration::new(0, (1_000_000_000u64 / config.fps) as u32);
     let frame_for_offset = config.data_window() / 2;
-    // frame_for_offset += frame_delta.mul_f64(alpha_frame_offset());
     loop {
         let now = Instant::now();
 
@@ -124,7 +123,7 @@ pub fn visualize(file: &str) -> Result<()> {
     }
 }
 
-fn create_data_src(file: &str) -> Result<(impl Framed<f64, WavFile>, VizPipelineConfig, WavFile)> {
+fn create_data_src(file: &str) -> Result<(impl Framed<VizFloat, WavFile>, VizPipelineConfig, WavFile)> {
     const BUF_SIZE: usize = 32768;
 
     let config = open_config_or_default()?;
@@ -132,7 +131,7 @@ fn create_data_src(file: &str) -> Result<(impl Framed<f64, WavFile>, VizPipeline
     Ok((frame_src, config, WavFile::open(file, BUF_SIZE)?))
 }
 
-fn draw_frame(canvas: &mut WindowCanvas, frame: &[f64]) -> Result<()> {
+fn draw_frame(canvas: &mut WindowCanvas, frame: &[VizFloat]) -> Result<()> {
     const BIN_MARGIN: u32 = 3;
 
     canvas.set_draw_color(Color::BLACK);
@@ -151,7 +150,7 @@ fn draw_frame(canvas: &mut WindowCanvas, frame: &[f64]) -> Result<()> {
         cur_x = rx + BIN_MARGIN;
 
         let v = frame[i as usize];
-        let mut ty = ((1.0 - v) * (avail_height as f64)) as u32;
+        let mut ty = ((1.0 - v) * (avail_height as VizFloat)) as u32;
         const MIN_HEIGHT: u32 = 4;
         if ty < MIN_HEIGHT {
             ty = MIN_HEIGHT

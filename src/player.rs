@@ -1,6 +1,7 @@
 use crate::channeled::Channeled;
 use crate::framed::{Sampled, Samples};
 use crate::wav::WavFile;
+use crate::util::VizFloat;
 use anyhow::Result;
 use sdl2::audio::{AudioCallback, AudioDevice, AudioSpecDesired};
 use sdl2::AudioSubsystem;
@@ -123,13 +124,13 @@ impl AudioCallback for WavCallback {
         while let Some(sample) = self.inner.source.next_sample().expect("no err") {
             match sample {
                 Channeled::Mono(v) => {
-                    let v: f64 = v.into();
+                    let v: VizFloat = v.into();
                     let v = v as f32;
                     data[idx] = v;
                 }
                 Channeled::Stereo(l, r) => {
-                    let l: f64 = l.into();
-                    let r: f64 = r.into();
+                    let l: VizFloat = l.into();
+                    let r: VizFloat = r.into();
                     let l = l as f32;
                     let r = r as f32;
                     data[idx] = l;

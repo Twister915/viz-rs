@@ -9,6 +9,7 @@ use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 use std::str::from_utf8;
+use crate::util::VizFloat;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SampleRaw {
@@ -22,13 +23,13 @@ impl Default for SampleRaw {
     }
 }
 
-impl Into<f64> for SampleRaw {
-    fn into(self) -> f64 {
+impl Into<VizFloat> for SampleRaw {
+    fn into(self) -> VizFloat {
         use SampleRaw::*;
 
         match self {
-            OneByte(b) => ((b as f64 / 255.0) * 2.0) - 1.0,
-            TwoBytes(b) => ((b as f64) / 65535.0) * 2.0,
+            OneByte(b) => ((b as VizFloat / 255.0) * 2.0) - 1.0,
+            TwoBytes(b) => ((b as VizFloat) / 65535.0) * 2.0,
         }
     }
 }
@@ -196,13 +197,12 @@ impl Samples<Channeled<SampleRaw>, WavFile> for WavFile {
 
     fn seek_samples(&mut self, n: isize) -> Result<(), Error> {
         let new_sample_at = (self.sample_at as isize) + n;
-        if !self.does_sample_exist(new_sample_at) {
-            return Ok(());
+        if self.does_sample_exist(new_sample_at) {
+            let byte_offset = (n * (self.block_align as isize)) as i64;
+            self.f.seek(SeekFrom::Current(byte_offset))?;
+            self.sample_at = new_sample_at as usize;
         }
 
-        let byte_offset = (n * (self.block_align as isize)) as i64;
-        self.f.seek(SeekFrom::Current(byte_offset))?;
-        self.sample_at = new_sample_at as usize;
         Ok(())
     }
 

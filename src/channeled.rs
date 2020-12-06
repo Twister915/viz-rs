@@ -42,15 +42,11 @@ impl<T> Channeled<T> {
         }
     }
 
-    pub fn try_map<F, R>(self, mut f: F) -> Result<Channeled<R>>
+    pub fn try_map<F, R>(self, f: F) -> Result<Channeled<R>>
     where
         F: FnMut(T) -> Result<R>,
     {
-        use Channeled::*;
-        Ok(match self {
-            Stereo(a, b) => Stereo(f(a)?, f(b)?),
-            Mono(v) => Mono(f(v)?),
-        })
+        self.map(f).invert_result()
     }
 
     pub fn for_each<F>(self, f: F)
@@ -78,21 +74,21 @@ impl<T> Channeled<T> {
 
     pub fn zip<O>(self, other: Channeled<O>) -> Option<Channeled<(T, O)>> {
         use Channeled::*;
+        match (self, other) {
+            (Stereo(al, ar), Stereo(bl, br)) => Some(Stereo((al, bl), (ar, br))),
+            (Mono(a), Mono(b)) => Some(Mono((a, b))),
+            _ => None
+        }
+    }
+}
+
+impl<R, X> Channeled<Result<R, X>> {
+    pub fn invert_result(self) -> Result<Channeled<R>, X> {
+        use Channeled::*;
         match self {
-            Stereo(a, b) => {
-                if let Stereo(oa, ob) = other {
-                    Some(Stereo((a, oa), (b, ob)))
-                } else {
-                    None
-                }
-            }
-            Mono(v) => {
-                if let Mono(ov) = other {
-                    Some(Mono((v, ov)))
-                } else {
-                    None
-                }
-            }
+            Stereo(Ok(lv), Ok(rv)) => Ok(Stereo(lv, rv)),
+            Mono(Ok(v)) => Ok(Mono(v)),
+            Stereo(Err(err), _) | Stereo(_, Err(err)) | Mono(Err(err)) => Err(err),
         }
     }
 }
@@ -133,12 +129,10 @@ where
 
     fn next(&mut self) -> Option<Self::Item> {
         use Channeled::*;
-        match &mut self.iters {
-            Stereo(a, b) => match (a.next(), b.next()) {
-                (Some(va), Some(vb)) => Some(Stereo(va, vb)),
-                _ => None,
-            },
-            Mono(v) => v.next().map(move |v| Mono(v)),
+        match self.iters.as_mut_ref().map(move |v| v.next()) {
+            Stereo(Some(vl), Some(vr)) => Some(Stereo(vl, vr)),
+            Mono(Some(v)) => Some(Mono(v)),
+            _ => None
         }
     }
 

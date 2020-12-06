@@ -70,7 +70,7 @@
 ///
 use crate::channeled::Channeled;
 use crate::framed::FramedMapper;
-use crate::util::log_timed;
+use crate::util::{log_timed, VizFloat};
 use anyhow::Result;
 use itertools::Itertools;
 use num_rational::Rational64;
@@ -124,12 +124,12 @@ fn weight(i: Rational64, t: Rational64, m: Rational64, n: Rational64, s: Rationa
     w
 }
 
-fn weights(m: i64, t: Rational64, n: Rational64, s: Rational64) -> Vec<(f64, f64)> {
+fn weights(m: i64, t: Rational64, n: Rational64, s: Rational64) -> Vec<(VizFloat, VizFloat)> {
     (0..((2 * m) + 1))
         .into_par_iter()
         .map(move |i| weight(((i - m) as i64).into(), t, (m as i64).into(), n, s))
         .map(move |f| f.reduced())
-        .map(move |f| (*f.numer() as f64, *f.denom() as f64))
+        .map(move |f| (*f.numer() as VizFloat, *f.denom() as VizFloat))
         .collect::<Vec<_>>()
 }
 
@@ -148,7 +148,7 @@ impl SavitzkyGolayConfig {
         SavitzkyGolayMapper::new(size, self)
     }
 
-    pub fn compute_coefficients(&self) -> Vec<Vec<(f64, f64)>> {
+    pub fn compute_coefficients(&self) -> Vec<Vec<(VizFloat, VizFloat)>> {
         if self.window_size % 2 == 0 || self.window_size < 3 {
             panic!("invalid window size {}", self.window_size)
         }
@@ -175,9 +175,9 @@ impl SavitzkyGolayConfig {
 
 #[derive(Debug)]
 pub struct SavitzkyGolayMapper {
-    buf: Vec<Channeled<f64>>,
+    buf: Vec<Channeled<VizFloat>>,
     cap: usize,
-    coefficients: Vec<Vec<(f64, f64)>>,
+    coefficients: Vec<Vec<(VizFloat, VizFloat)>>,
 }
 
 impl SavitzkyGolayMapper {
@@ -190,11 +190,11 @@ impl SavitzkyGolayMapper {
     }
 }
 
-impl FramedMapper<Channeled<f64>, Channeled<f64>> for SavitzkyGolayMapper {
+impl FramedMapper<Channeled<VizFloat>, Channeled<VizFloat>> for SavitzkyGolayMapper {
     fn map<'a>(
         &'a mut self,
-        input: &'a mut [Channeled<f64>],
-    ) -> Result<Option<&'a mut [Channeled<f64>]>> {
+        input: &'a mut [Channeled<VizFloat>],
+    ) -> Result<Option<&'a mut [Channeled<VizFloat>]>> {
         let coefficients = self.coefficients.as_slice();
         let half_size = coefficients.len() / 2;
 
@@ -232,7 +232,7 @@ impl FramedMapper<Channeled<f64>, Channeled<f64>> for SavitzkyGolayMapper {
     }
 }
 
-fn multiply_rational_float((numer, denom): &(f64, f64), float: f64) -> f64 {
+fn multiply_rational_float((numer, denom): &(VizFloat, VizFloat), float: VizFloat) -> VizFloat {
     (float * *numer) / *denom
 }
 

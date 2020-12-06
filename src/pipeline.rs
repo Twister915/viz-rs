@@ -14,26 +14,27 @@ use std::fs::File;
 use std::include_str;
 use std::io::ErrorKind;
 use std::time::Duration;
+use crate::util::VizFloat;
 
 #[derive(Debug, Clone, Copy, Deserialize)]
 pub struct VizPipelineConfig {
     pub fps: u64,
     pub data_window_ms: u64,
-    pub alpha0: f64,
-    pub alpha1: f64,
+    pub alpha0: VizFloat,
+    pub alpha1: VizFloat,
     pub smoothing0: SavitzkyGolayConfig,
     pub smoothing1: SavitzkyGolayConfig,
-    pub min_db: f64,
-    pub max_db: f64,
+    pub min_db: VizFloat,
+    pub max_db: VizFloat,
     pub binning: VizBinningConfig,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
 pub struct VizBinningConfig {
     pub bins: usize,
-    pub fmax: f64,
-    pub fmin: f64,
-    pub gamma: f64,
+    pub fmax: VizFloat,
+    pub fmin: VizFloat,
+    pub gamma: VizFloat,
     pub discrete_levels: u32,
 }
 
@@ -45,13 +46,13 @@ impl VizPipelineConfig {
 
 const SEEK_BACK_LIMIT: usize = 1;
 
-pub fn create_viz_pipeline<E, I, S>(source: S, config: VizPipelineConfig) -> Result<impl Framed<f64, I>>
+pub fn create_viz_pipeline<E, I, S>(source: S, config: VizPipelineConfig) -> Result<impl Framed<VizFloat, I>>
 where
     S: Samples<Channeled<E>, I>,
-    E: Into<f64>,
+    E: Into<VizFloat>,
 {
     Ok(source
-        // change RawSample to f64
+        // change RawSample to VizFloat
         .map(move |v| v.map(move |c| c.into()))
         // sliding frames of data
         .compose(move |wav| {
@@ -108,11 +109,11 @@ where
         .compose(move |frames| FramedTimed::new(frames, 1024)))
 }
 
-fn to_db(v: &mut f64) {
+fn to_db(v: &mut VizFloat) {
     *v = 20.0 * v.log10();
 }
 
-fn normalize_between(v: &mut f64, min: f64, max: f64) {
+fn normalize_between(v: &mut VizFloat, min: VizFloat, max: VizFloat) {
     let vv = *v;
     if vv < min {
         *v = 0.0;
@@ -123,16 +124,16 @@ fn normalize_between(v: &mut f64, min: f64, max: f64) {
     }
 }
 
-fn normalize_infs(v: &mut f64) {
+fn normalize_infs(v: &mut VizFloat) {
     let vv = *v;
-    if v.is_nan() || vv == f64::NEG_INFINITY {
+    if v.is_nan() || vv == VizFloat::NEG_INFINITY {
         *v = 0.0;
-    } else if vv == f64::INFINITY {
+    } else if vv == VizFloat::INFINITY {
         *v = 1.0;
     }
 }
 
-fn constrain_normalized(v: &mut f64) {
+fn constrain_normalized(v: &mut VizFloat) {
     let vv = *v;
     if vv > 1.0 {
         *v = 1.0;
@@ -141,16 +142,16 @@ fn constrain_normalized(v: &mut f64) {
     }
 }
 
-fn flatten_channels(input: &Channeled<f64>) -> f64 {
+fn flatten_channels(input: &Channeled<VizFloat>) -> VizFloat {
     use Channeled::*;
     match *input {
-        Stereo(a, b) => (a + b) / 2.0,
+        Stereo(a, b) => (a + b) / (2.0 as VizFloat),
         Mono(v) => v,
     }
 }
 
-fn discrete_levels(levels: u32) -> impl FnMut(&mut f64) {
-    let levels = levels as f64;
+fn discrete_levels(levels: u32) -> impl FnMut(&mut VizFloat) {
+    let levels = levels as VizFloat;
     move |v| *v = (*v * levels).floor() / levels
 }
 

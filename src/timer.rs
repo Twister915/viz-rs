@@ -41,8 +41,8 @@ where
     }
 
     fn next_frame(&mut self) -> Result<Option<&mut [T]>> {
+        let source = &mut self.source;
         let result = if self.counter % self.every_nth == 0 {
-            let source = &mut self.source;
             let (dur, out) = timed(move || source.next_frame());
             if let Ok(Some(_)) = &out {
                 println!("frame computed in {:?}", dur);
@@ -50,7 +50,7 @@ where
 
             out
         } else {
-            self.source.next_frame()
+            source.next_frame()
         };
 
         self.counter += 1;

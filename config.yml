@@ -1,6 +1,6 @@
 fps: 150
 
-data_window_ms: 150
+data_window_ms: 96
 
 alpha0: 0.75
 alpha1: 0.65
@@ -22,5 +22,5 @@ binning:
   gamma: 2.3
   discrete_levels: 48
 
-min_db: -29.0
-max_db: -8.5
+min_db: -32.0
+max_db: -12.5

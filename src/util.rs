@@ -3,6 +3,10 @@ use std::iter::FusedIterator;
 use std::ops::Sub;
 use std::time::{Duration, Instant};
 
+pub type VizFloat = f64;
+pub type VizComplex = fftw::types::c64;
+pub type VizFftPlan = fftw::plan::R2CPlan64;
+
 pub fn slice_copy_from<T, I>(slice: &mut [T], mut iter: I) -> &mut [T]
 where
     I: Iterator<Item = T>,

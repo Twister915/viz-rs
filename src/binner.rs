@@ -1,6 +1,6 @@
 use crate::channeled::Channeled;
 use crate::framed::FramedMapper;
-use crate::util::log_timed;
+use crate::util::{log_timed, VizFloat};
 use anyhow::Result;
 
 pub struct Binner {
@@ -24,11 +24,11 @@ impl Binner {
     }
 }
 
-impl FramedMapper<Channeled<f64>, Channeled<f64>> for Binner {
+impl FramedMapper<Channeled<VizFloat>, Channeled<VizFloat>> for Binner {
     fn map<'a>(
         &'a mut self,
-        input: &'a mut [Channeled<f64>],
-    ) -> Result<Option<&'a mut [Channeled<f64>]>> {
+        input: &'a mut [Channeled<VizFloat>],
+    ) -> Result<Option<&'a mut [Channeled<VizFloat>]>> {
         if input.len() != self.in_size {
             return Ok(None);
         }
@@ -72,7 +72,7 @@ impl FramedMapper<Channeled<f64>, Channeled<f64>> for Binner {
             }
         }
 
-        let in_size = self.in_size as f64;
+        let in_size = self.in_size as VizFloat;
         input
             .iter_mut()
             .for_each(move |e| e.as_mut_ref().for_each(move |v| *v /= in_size));
@@ -89,19 +89,19 @@ pub struct BinConfig {
     pub bins: usize,
     pub input_size: usize,
     pub sample_rate: usize,
-    pub fmin: f64,
-    pub fmax: f64,
-    pub gamma: f64,
+    pub fmin: VizFloat,
+    pub fmax: VizFloat,
+    pub gamma: VizFloat,
 }
 
 fn compute_bin_indexes(config: &BinConfig, num_bins: usize) -> Vec<usize> {
-    let total_max_freq = (config.sample_rate as f64) / 2.0;
-    let bandwidth_per_src_bin = total_max_freq / (config.input_size as f64);
+    let total_max_freq = (config.sample_rate as VizFloat) / 2.0;
+    let bandwidth_per_src_bin = total_max_freq / (config.input_size as VizFloat);
     let gamma_inv = 1.0 / config.gamma;
-    let n_bins = num_bins as f64;
+    let n_bins = num_bins as VizFloat;
     let freq_range = config.fmax - config.fmin;
     let mut out = vec![None; num_bins + 1];
-    let hz_for_idx = move |idx: usize| (idx as f64) * bandwidth_per_src_bin;
+    let hz_for_idx = move |idx: usize| (idx as VizFloat) * bandwidth_per_src_bin;
     for i in 0..config.input_size {
         let f_start = hz_for_idx(i);
         if f_start < config.fmin {

@@ -1,15 +1,16 @@
 use crate::channeled::Channeled;
 use crate::framed::FramedMapper;
 use anyhow::Result;
+use crate::util::VizFloat;
 
 pub struct ExponentialSmoothing {
-    previous: Vec<Vec<Channeled<f64>>>,
+    previous: Vec<Vec<Channeled<VizFloat>>>,
     n_prev: usize,
-    alpha: f64,
+    alpha: VizFloat,
 }
 
 impl ExponentialSmoothing {
-    pub fn new(seek_back_limit: usize, alpha: f64) -> Self {
+    pub fn new(seek_back_limit: usize, alpha: VizFloat) -> Self {
         Self {
             previous: Vec::with_capacity(seek_back_limit),
             n_prev: seek_back_limit,
@@ -18,11 +19,11 @@ impl ExponentialSmoothing {
     }
 }
 
-impl FramedMapper<Channeled<f64>, Channeled<f64>> for ExponentialSmoothing {
+impl FramedMapper<Channeled<VizFloat>, Channeled<VizFloat>> for ExponentialSmoothing {
     fn map<'a>(
         &'a mut self,
-        input: &'a mut [Channeled<f64>],
-    ) -> Result<Option<&'a mut [Channeled<f64>]>> {
+        input: &'a mut [Channeled<VizFloat>],
+    ) -> Result<Option<&'a mut [Channeled<VizFloat>]>> {
         if let Some(prev) = self.previous.get(0) {
             let alpha = self.alpha;
             let alpha_inv = 1.0 - alpha;
