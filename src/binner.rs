@@ -4,25 +4,17 @@ use crate::util::{VizFloat, log_timed};
 use anyhow::Result;
 
 pub struct Binner {
-    indexes: Vec<usize>,
-    n_bins: usize,
-    in_size: usize,
+    layout: BinLayout,
     out: Vec<Channeled<VizFloat>>,
 }
 
 impl Binner {
-    pub fn new(config: BinConfig) -> Self {
-        log_timed(format!("compute bin constants for {:?}", config), || {
-            let indexes = compute_bin_indexes(&config);
-            let n_bins = indexes.len() - 1;
-            let in_size = config.input_size;
-            Self {
-                indexes,
-                n_bins,
-                in_size,
-                out: Vec::with_capacity(n_bins),
-            }
-        })
+    pub fn from_layout(layout: BinLayout) -> Self {
+        let n_bins = layout.len();
+        Self {
+            layout,
+            out: Vec::with_capacity(n_bins),
+        }
     }
 }
 
@@ -34,7 +26,7 @@ impl FramedMapper for Binner {
         &'a mut self,
         input: &'a mut [Channeled<VizFloat>],
     ) -> Result<Option<&'a mut [Channeled<VizFloat>]>> {
-        if input.len() != self.in_size {
+        if input.len() != self.layout.input_size() {
             return Ok(None);
         }
 
@@ -44,11 +36,11 @@ impl FramedMapper for Binner {
 
         let zero = input[0].map(move |_| 0.0);
         self.out.clear();
-        self.out.resize(self.n_bins, zero);
+        self.out.resize(self.layout.len(), zero);
 
-        for bin_idx in 0..self.n_bins {
-            let start = self.indexes[bin_idx].min(input.len());
-            let end = self.indexes[bin_idx + 1].min(input.len());
+        for bin_idx in 0..self.layout.len() {
+            let start = self.layout.indexes[bin_idx].min(input.len());
+            let end = self.layout.indexes[bin_idx + 1].min(input.len());
             if start >= end {
                 continue;
             }
@@ -76,7 +68,7 @@ impl FramedMapper for Binner {
     }
 
     fn map_frame_size(&self, _: usize) -> usize {
-        self.n_bins
+        self.layout.len()
     }
 }
 
@@ -90,13 +82,86 @@ pub struct BinConfig {
     pub gamma: VizFloat,
 }
 
+#[derive(Clone, Debug)]
+pub struct BinLayout {
+    indexes: Vec<usize>,
+    input_size: usize,
+    bandwidth_per_src_bin: VizFloat,
+}
+
+impl BinLayout {
+    pub fn new(config: BinConfig) -> Self {
+        log_timed(format!("compute bin constants for {:?}", config), || {
+            let indexes = compute_bin_indexes(&config);
+            Self {
+                indexes,
+                input_size: config.input_size,
+                bandwidth_per_src_bin: bandwidth_per_src_bin(&config),
+            }
+        })
+    }
+
+    pub fn input_size(&self) -> usize {
+        self.input_size
+    }
+
+    pub fn len(&self) -> usize {
+        self.indexes.len().saturating_sub(1)
+    }
+
+    pub fn bin_size(&self, bin_idx: usize) -> usize {
+        self.indexes
+            .get(bin_idx..=bin_idx + 1)
+            .and_then(move |win| win.first().zip(win.get(1)))
+            .map(move |(start, end)| end.saturating_sub(*start))
+            .unwrap_or(0)
+    }
+
+    pub fn center_hz(&self, bin_idx: usize) -> VizFloat {
+        let Some(start) = self.indexes.get(bin_idx).copied() else {
+            return 0.0;
+        };
+        let Some(end) = self.indexes.get(bin_idx + 1).copied() else {
+            return 0.0;
+        };
+        if start >= end {
+            return 0.0;
+        }
+
+        let low = self.hz_for_idx(start);
+        let high = self.hz_for_idx(end - 1);
+        if low > 0.0 && high > 0.0 {
+            (low * high).sqrt()
+        } else {
+            (low + high) / 2.0
+        }
+    }
+
+    #[cfg(test)]
+    fn indexes(&self) -> &[usize] {
+        &self.indexes
+    }
+
+    fn hz_for_idx(&self, idx: usize) -> VizFloat {
+        ((idx + 1) as VizFloat) * self.bandwidth_per_src_bin
+    }
+}
+
+fn bandwidth_per_src_bin(config: &BinConfig) -> VizFloat {
+    if config.input_size == 0 {
+        0.0
+    } else {
+        ((config.sample_rate as VizFloat) / 2.0) / (config.input_size as VizFloat)
+    }
+}
+
 fn compute_bin_indexes(config: &BinConfig) -> Vec<usize> {
     if config.input_size == 0 || config.bins == 0 {
         return vec![0];
     }
 
     let nyquist = (config.sample_rate as VizFloat) / 2.0;
-    let bandwidth_per_src_bin = nyquist / (config.input_size as VizFloat);
+    let bandwidth_per_src_bin = bandwidth_per_src_bin(config);
     let fmin = config.fmin.max(0.0).min(nyquist);
     let fmax = config.fmax.max(fmin).min(nyquist);
     let idx_for_edge = move |hz: VizFloat| -> usize {
@@ -209,8 +274,8 @@ mod tests {
     }
 
     #[test]
-    fn bins_are_rms_averaged_by_their_own_width() {
-        let mut binner = Binner::new(BinConfig {
+    fn bin_layout_reports_widths_and_centers() {
+        let layout = BinLayout::new(BinConfig {
             bins: 2,
             input_size: 4,
             sample_rate: 8,
@@ -218,6 +283,24 @@ mod tests {
             fmax: 4.0,
             gamma: 1.0,
         });
+
+        assert_eq!(layout.indexes(), &[0, 2, 4]);
+        assert_eq!(layout.bin_size(0), 2);
+        assert_eq!(layout.bin_size(1), 2);
+        assert!((layout.center_hz(0) - VizFloat::sqrt(2.0)).abs() < 1e-12);
+        assert!((layout.center_hz(1) - VizFloat::sqrt(12.0)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn bins_are_rms_averaged_by_their_own_width() {
+        let mut binner = Binner::from_layout(BinLayout::new(BinConfig {
+            bins: 2,
+            input_size: 4,
+            sample_rate: 8,
+            fmin: 1.0,
+            fmax: 4.0,
+            gamma: 1.0,
+        }));
         let mut input = [
             Channeled::Mono(1.0),
             Channeled::Mono(1.0),

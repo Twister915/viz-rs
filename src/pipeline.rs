@@ -1,8 +1,8 @@
-use crate::binner::{BinConfig, Binner};
+use crate::binner::{BinConfig, BinLayout, Binner};
 use crate::channeled::Channeled;
 use crate::exponential_smoothing::ExponentialSmoothing;
 use crate::fft::FramedFft;
-use crate::framed::{Framed, Sampled, Samples, SplitChanneledFramedMapper};
+use crate::framed::{Framed, FramedMapper, Sampled, Samples, SplitChanneledFramedMapper};
 use crate::savitzky_golay::SavitzkyGolayConfig;
 use crate::sliding::SlidingFrame;
 use crate::timer::FramedTimed;
@@ -20,8 +20,16 @@ use std::time::Duration;
 pub struct VizPipelineConfig {
     pub fps: u64,
     pub data_window_ms: u64,
+    #[serde(default = "default_background_color")]
+    pub background_color: VizColor,
     #[serde(default = "default_bar_color")]
     pub bar_color: VizColor,
+    #[serde(default = "default_bar_difference_color")]
+    pub bar_difference_color: VizColor,
+    #[serde(default = "default_debug_fft_overlay_color")]
+    pub debug_fft_overlay_color: VizColor,
+    #[serde(default)]
+    pub high_water_line: VizHighWaterLineConfig,
     pub alpha0: VizFloat,
     pub alpha1: VizFloat,
     pub smoothing0: SavitzkyGolayConfig,
@@ -38,6 +46,48 @@ pub struct VizBinningConfig {
     pub fmin: VizFloat,
     pub gamma: VizFloat,
     pub discrete_levels: u32,
+    #[serde(default)]
+    pub compensation: VizBinCompensationConfig,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+pub struct VizBinCompensationConfig {
+    #[serde(default)]
+    pub bandwidth_weight: VizFloat,
+    #[serde(default)]
+    pub spectral_tilt_db_per_octave: VizFloat,
+    #[serde(default = "default_tilt_reference_hz")]
+    pub tilt_reference_hz: VizFloat,
+    #[serde(default = "default_max_compensation_adjustment_db")]
+    pub max_adjustment_db: VizFloat,
+}
+
+impl Default for VizBinCompensationConfig {
+    fn default() -> Self {
+        Self {
+            bandwidth_weight: 0.0,
+            spectral_tilt_db_per_octave: 0.0,
+            tilt_reference_hz: default_tilt_reference_hz(),
+            max_adjustment_db: default_max_compensation_adjustment_db(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+pub struct VizHighWaterLineConfig {
+    #[serde(default = "default_high_water_line_color")]
+    pub color: VizColor,
+    #[serde(default = "default_high_water_line_fall_acceleration")]
+    pub fall_acceleration: VizFloat,
+}
+
+impl Default for VizHighWaterLineConfig {
+    fn default() -> Self {
+        Self {
+            color: default_high_water_line_color(),
+            fall_acceleration: default_high_water_line_fall_acceleration(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,7 +114,35 @@ impl<'de> Deserialize<'de> for VizColor {
 }
 
 fn default_bar_color() -> VizColor {
-    VizColor::rgb(0, 255, 0)
+    VizColor::rgb(79, 159, 209)
+}
+
+fn default_background_color() -> VizColor {
+    VizColor::rgb(214, 236, 252)
+}
+
+fn default_bar_difference_color() -> VizColor {
+    VizColor::rgb(185, 231, 255)
+}
+
+fn default_debug_fft_overlay_color() -> VizColor {
+    VizColor::rgb(95, 135, 165)
+}
+
+fn default_high_water_line_color() -> VizColor {
+    VizColor::rgb(248, 252, 255)
+}
+
+fn default_high_water_line_fall_acceleration() -> VizFloat {
+    2.0
+}
+
+fn default_tilt_reference_hz() -> VizFloat {
+    1000.0
+}
+
+fn default_max_compensation_adjustment_db() -> VizFloat {
+    18.0
 }
 
 fn parse_hex_color(value: &str) -> Result<VizColor, String> {
@@ -72,7 +150,7 @@ fn parse_hex_color(value: &str) -> Result<VizColor, String> {
     let bytes = hex.as_bytes();
     if bytes.len() != 6 {
         return Err(format!(
-            "bar_color must be a 6-digit hex color like #00ff00, got {value:?}"
+            "color must be a 6-digit hex color like #4f9fd1, got {value:?}"
         ));
     }
 
@@ -94,7 +172,7 @@ fn parse_hex_digit(byte: u8, original: &str) -> Result<u8, String> {
         b'a'..=b'f' => Ok(byte - b'a' + 10),
         b'A'..=b'F' => Ok(byte - b'A' + 10),
         _ => Err(format!(
-            "bar_color must contain only hex digits, got {original:?}"
+            "color must contain only hex digits, got {original:?}"
         )),
     }
 }
@@ -110,34 +188,32 @@ const SEEK_BACK_LIMIT: usize = 1;
 pub fn create_viz_pipeline<E, S>(
     source: S,
     config: VizPipelineConfig,
-) -> Result<impl Framed<Item = VizFloat>>
+) -> Result<impl Framed<Item = Channeled<VizFloat>>>
 where
     S: Samples<Item = Channeled<E>>,
     E: Into<VizFloat>,
 {
-    Ok(create_binned_fft_pipeline(source, config)?
-        // dBFS-ish conversion and clamp between min/max dB -> (0, 1)
-        .map_mut(move |v| normalize_amplitude_db(v, config.min_db, config.max_db))
-        // nearby bars smoothing Savitzky Golay, now in display space
-        .lift(move |size| config.smoothing0.into_mapper(size).split_channeled(size))
-        // keep smooth data inside (0, 1)
-        .map_mut(constrain_normalized)
-        // time smoothing
-        .lift(move |size| {
-            ExponentialSmoothing::new(SEEK_BACK_LIMIT, config.alpha0).split_channeled(size)
-        })
-        // one more gentle spatial smoothing pass after the first temporal pass
-        .lift(move |size| config.smoothing1.into_mapper(size).split_channeled(size))
-        // keep smooth data inside (0, 1)
-        .map_mut(constrain_normalized)
-        // time smoothing again
-        .lift(move |size| {
-            ExponentialSmoothing::new(SEEK_BACK_LIMIT, config.alpha1).split_channeled(size)
-        })
-        // 48 distinct "levels" each bar can take on
-        .map_mut(discrete_levels(config.binning.discrete_levels))
-        // time the frames and log it
-        .compose(move |frames| FramedTimed::new(frames, 1024)))
+    Ok(
+        create_binned_fft_pipeline(source, config, config.binning.compensation)?
+            // dBFS-ish conversion and clamp between min/max dB -> (0, 1)
+            .map_mut(move |v| normalize_amplitude_db_channels(v, config.min_db, config.max_db))
+            // nearby bars smoothing Savitzky Golay, now in display space
+            .lift(move |size| config.smoothing0.into_mapper(size))
+            // keep smooth data inside (0, 1)
+            .map_mut(constrain_normalized_channels)
+            // time smoothing
+            .lift(move |_| ExponentialSmoothing::new(SEEK_BACK_LIMIT, config.alpha0))
+            // one more gentle spatial smoothing pass after the first temporal pass
+            .lift(move |size| config.smoothing1.into_mapper(size))
+            // keep smooth data inside (0, 1)
+            .map_mut(constrain_normalized_channels)
+            // time smoothing again
+            .lift(move |_| ExponentialSmoothing::new(SEEK_BACK_LIMIT, config.alpha1))
+            // 48 distinct "levels" each bar can take on
+            .map_mut(discrete_channel_levels(config.binning.discrete_levels))
+            // time the frames and log it
+            .compose(move |frames| FramedTimed::new(frames, 1024)),
+    )
 }
 
 pub fn create_debug_fft_pipeline<E, S>(
@@ -148,18 +224,22 @@ where
     S: Samples<Item = Channeled<E>>,
     E: Into<VizFloat>,
 {
-    Ok(create_binned_fft_pipeline(source, config)?
-        // Smooth raw binned FFT amplitudes without applying the display dB scale.
-        .lift(move |size| config.smoothing0.into_mapper(size).split_channeled(size))
-        .lift(move |size| {
-            ExponentialSmoothing::new(SEEK_BACK_LIMIT, config.alpha0).split_channeled(size)
-        }))
+    Ok(
+        create_binned_fft_pipeline(source, config, VizBinCompensationConfig::default())?
+            .map(flatten_channels)
+            // Smooth raw binned FFT amplitudes without applying the display dB scale.
+            .lift(move |size| config.smoothing0.into_mapper(size).split_channeled(size))
+            .lift(move |size| {
+                ExponentialSmoothing::new(SEEK_BACK_LIMIT, config.alpha0).split_channeled(size)
+            }),
+    )
 }
 
 fn create_binned_fft_pipeline<E, S>(
     source: S,
     config: VizPipelineConfig,
-) -> Result<impl Framed<Item = VizFloat>>
+    compensation: VizBinCompensationConfig,
+) -> Result<impl Framed<Item = Channeled<VizFloat>>>
 where
     S: Samples<Item = Channeled<E>>,
     E: Into<VizFloat>,
@@ -194,10 +274,72 @@ where
                 input_size: source.full_frame_size(),
                 sample_rate: source.sample_rate(),
             };
-            source.apply_mapper(Binner::new(config))
-        })
-        // Channeled data to a single RMS amplitude per bar
-        .map(flatten_channels))
+            let layout = BinLayout::new(config);
+            let compensation = BinDisplayCompensation::new(&layout, compensation);
+            source
+                .apply_mapper(Binner::from_layout(layout))
+                .apply_mapper(compensation)
+        }))
+}
+
+struct BinDisplayCompensation {
+    amplitude_gains: Vec<VizFloat>,
+}
+
+impl BinDisplayCompensation {
+    fn new(layout: &BinLayout, config: VizBinCompensationConfig) -> Self {
+        let amplitude_gains = (0..layout.len())
+            .map(move |idx| {
+                let gain_db =
+                    compensation_gain_db(layout.bin_size(idx), layout.center_hz(idx), config);
+                VizFloat::powf(10.0, gain_db / 20.0)
+            })
+            .collect();
+
+        Self { amplitude_gains }
+    }
+}
+
+impl FramedMapper for BinDisplayCompensation {
+    type Input = Channeled<VizFloat>;
+    type Output = Channeled<VizFloat>;
+
+    fn map<'a>(
+        &'a mut self,
+        input: &'a mut [Channeled<VizFloat>],
+    ) -> Result<Option<&'a mut [Channeled<VizFloat>]>> {
+        if input.len() != self.amplitude_gains.len() {
+            return Ok(None);
+        }
+
+        for (elem, gain) in input.iter_mut().zip(self.amplitude_gains.iter().copied()) {
+            if gain != 1.0 {
+                *elem = (*elem).map(move |v| v * gain);
+            }
+        }
+
+        Ok(Some(input))
+    }
+}
+
+fn compensation_gain_db(
+    bin_size: usize,
+    center_hz: VizFloat,
+    config: VizBinCompensationConfig,
+) -> VizFloat {
+    let bandwidth_db = if bin_size <= 1 {
+        0.0
+    } else {
+        config.bandwidth_weight * 10.0 * (bin_size as VizFloat).log10()
+    };
+
+    let tilt_db = if center_hz > 0.0 && config.tilt_reference_hz > 0.0 {
+        config.spectral_tilt_db_per_octave * (center_hz / config.tilt_reference_hz).log2()
+    } else {
+        0.0
+    };
+
+    (bandwidth_db + tilt_db).clamp(-config.max_adjustment_db, config.max_adjustment_db)
 }
 
 fn normalize_amplitude_db(v: &mut VizFloat, min: VizFloat, max: VizFloat) {
@@ -231,6 +373,21 @@ fn constrain_normalized(v: &mut VizFloat) {
     }
 }
 
+fn normalize_amplitude_db_channels(input: &mut Channeled<VizFloat>, min: VizFloat, max: VizFloat) {
+    for_each_channel(input, move |v| normalize_amplitude_db(v, min, max));
+}
+
+fn constrain_normalized_channels(input: &mut Channeled<VizFloat>) {
+    for_each_channel(input, constrain_normalized);
+}
+
+fn for_each_channel<F>(input: &mut Channeled<VizFloat>, f: F)
+where
+    F: FnMut(&mut VizFloat),
+{
+    input.as_mut_ref().for_each(f);
+}
+
 fn flatten_channels(input: &Channeled<VizFloat>) -> VizFloat {
     use Channeled::*;
     match *input {
@@ -239,9 +396,9 @@ fn flatten_channels(input: &Channeled<VizFloat>) -> VizFloat {
     }
 }
 
-fn discrete_levels(levels: u32) -> impl FnMut(&mut VizFloat) {
+fn discrete_channel_levels(levels: u32) -> impl FnMut(&mut Channeled<VizFloat>) {
     let levels = levels as VizFloat;
-    move |v| *v = (*v * levels).floor() / levels
+    move |input| for_each_channel(input, move |v| *v = (*v * levels).floor() / levels)
 }
 
 pub fn open_config_or_default() -> Result<VizPipelineConfig> {
@@ -319,6 +476,7 @@ fn validate_config(cfg: VizPipelineConfig) -> Result<VizPipelineConfig> {
 
     validate_smoothing_config(&cfg.smoothing0)?;
     validate_smoothing_config(&cfg.smoothing1)?;
+    validate_high_water_line_config(&cfg.high_water_line)?;
 
     if !cfg.min_db.is_normal() {
         return Err(anyhow!("invalid min_db, non-normal number {}", cfg.min_db));
@@ -377,7 +535,53 @@ fn validate_config(cfg: VizPipelineConfig) -> Result<VizPipelineConfig> {
         ));
     }
 
+    validate_compensation_config(&binning.compensation)?;
+
     Ok(cfg)
+}
+
+fn validate_compensation_config(cfg: &VizBinCompensationConfig) -> Result<()> {
+    if !cfg.bandwidth_weight.is_finite() || cfg.bandwidth_weight < 0.0 || cfg.bandwidth_weight > 1.0
+    {
+        return Err(anyhow!(
+            "bandwidth_weight must be finite and within [0.0, 1.0], got {}",
+            cfg.bandwidth_weight
+        ));
+    }
+
+    if !cfg.spectral_tilt_db_per_octave.is_finite() {
+        return Err(anyhow!(
+            "spectral_tilt_db_per_octave must be finite, got {}",
+            cfg.spectral_tilt_db_per_octave
+        ));
+    }
+
+    if !cfg.tilt_reference_hz.is_finite() || cfg.tilt_reference_hz <= 0.0 {
+        return Err(anyhow!(
+            "tilt_reference_hz must be finite and > 0, got {}",
+            cfg.tilt_reference_hz
+        ));
+    }
+
+    if !cfg.max_adjustment_db.is_finite() || cfg.max_adjustment_db < 0.0 {
+        return Err(anyhow!(
+            "max_adjustment_db must be finite and >= 0, got {}",
+            cfg.max_adjustment_db
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_high_water_line_config(cfg: &VizHighWaterLineConfig) -> Result<()> {
+    if !cfg.fall_acceleration.is_finite() || cfg.fall_acceleration < 0.0 {
+        return Err(anyhow!(
+            "high_water_line.fall_acceleration must be finite and >= 0, got {}",
+            cfg.fall_acceleration
+        ));
+    }
+
+    Ok(())
 }
 
 fn validate_smoothing_config(cfg: &SavitzkyGolayConfig) -> Result<()> {
@@ -408,6 +612,44 @@ fn default_config() -> VizPipelineConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compensation_blends_bandwidth_energy_and_spectral_tilt() {
+        let config = VizBinCompensationConfig {
+            bandwidth_weight: 0.5,
+            spectral_tilt_db_per_octave: 3.0,
+            tilt_reference_hz: 1000.0,
+            max_adjustment_db: 18.0,
+        };
+
+        let gain = compensation_gain_db(32, 8000.0, config);
+
+        assert!((gain - 16.52574989159953).abs() < 1e-12);
+    }
+
+    #[test]
+    fn compensation_clamps_large_adjustments() {
+        let config = VizBinCompensationConfig {
+            bandwidth_weight: 1.0,
+            spectral_tilt_db_per_octave: 12.0,
+            tilt_reference_hz: 1000.0,
+            max_adjustment_db: 6.0,
+        };
+
+        assert_eq!(compensation_gain_db(64, 16000.0, config), 6.0);
+        assert_eq!(compensation_gain_db(1, 125.0, config), -6.0);
+    }
+
+    #[test]
+    fn tracked_configs_parse() {
+        let default_config: VizPipelineConfig =
+            serde_yaml::from_str(include_str!("default-config.yml")).unwrap();
+        validate_config(default_config).unwrap();
+
+        let workspace_config: VizPipelineConfig =
+            serde_yaml::from_str(include_str!("../config.yml")).unwrap();
+        validate_config(workspace_config).unwrap();
+    }
 
     #[test]
     fn parses_bar_color_hex_codes() {

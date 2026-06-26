@@ -1,8 +1,126 @@
 fps: 150
 
-data_window_ms: 72
+data_window_ms: 136
 
-bar_color: "#ffafcc"
+# Uncomment one complete theme block to use it. If all themes stay commented,
+# the built-in color defaults are used.
+#
+# Theme: Calm Blue Sky
+# background_color: "#d6ecfc"
+# bar_color: "#4f9fd1"
+# bar_difference_color: "#b9e7ff"
+# debug_fft_overlay_color: "#5f87a5"
+# high_water_line:
+#   color: "#f8fcff"
+#   fall_acceleration: 1.0
+
+# Theme: Pale Dawn
+# background_color: "#edf7fb"
+# bar_color: "#6faed6"
+# bar_difference_color: "#fde6c8"
+# debug_fft_overlay_color: "#88a7bc"
+# high_water_line:
+#   color: "#fffaf0"
+#   fall_acceleration: 1.0
+
+# Theme: Deep Evening Sky
+# background_color: "#102a43"
+# bar_color: "#7cc7e8"
+# bar_difference_color: "#d8f3ff"
+# debug_fft_overlay_color: "#9ab6ca"
+# high_water_line:
+#   color: "#f3fbff"
+#   fall_acceleration: 1.0
+
+# Theme: Frosted Window
+# background_color: "#e6f1f6"
+# bar_color: "#7aa6bd"
+# bar_difference_color: "#c7eef6"
+# debug_fft_overlay_color: "#6f8795"
+# high_water_line:
+#   color: "#ffffff"
+#   fall_acceleration: 1.0
+
+Theme: Rain Washed Glass
+background_color: "#b6ccd8"
+bar_color: "#476f8f"
+bar_difference_color: "#a9d8ed"
+debug_fft_overlay_color: "#33546d"
+high_water_line:
+  color: "#eef8ff"
+  fall_acceleration: 1.0
+
+# Theme: Dark Songs
+# background_color: "#07080d"
+# bar_color: "#8a5cf6"
+# bar_difference_color: "#e43f5a"
+# debug_fft_overlay_color: "#3b4261"
+# high_water_line:
+#   color: "#f5f0ff"
+#   fall_acceleration: 1.0
+
+# Theme: Happy Songs
+# background_color: "#fff7b8"
+# bar_color: "#00a878"
+# bar_difference_color: "#ffb703"
+# debug_fft_overlay_color: "#5aa9e6"
+# high_water_line:
+#   color: "#ffffff"
+#   fall_acceleration: 1.0
+
+# Theme: Fast Songs
+# background_color: "#050b1a"
+# bar_color: "#00e5ff"
+# bar_difference_color: "#ff2d75"
+# debug_fft_overlay_color: "#f8ff00"
+# high_water_line:
+#   color: "#ffffff"
+#   fall_acceleration: 1.0
+
+# Theme: Slow Songs
+# background_color: "#1c2533"
+# bar_color: "#7f9bb3"
+# bar_difference_color: "#d7e8f7"
+# debug_fft_overlay_color: "#586f86"
+# high_water_line:
+#   color: "#edf6ff"
+#   fall_acceleration: 1.0
+
+# Theme: Piano Songs
+# background_color: "#f7f3ec"
+# bar_color: "#111827"
+# bar_difference_color: "#b28f62"
+# debug_fft_overlay_color: "#7b705f"
+# high_water_line:
+#   color: "#ffffff"
+#   fall_acceleration: 1.0
+
+# Theme: Love Songs
+# background_color: "#2b0f1f"
+# bar_color: "#e85d91"
+# bar_difference_color: "#ffc2d4"
+# debug_fft_overlay_color: "#a8466f"
+# high_water_line:
+#   color: "#fff1f7"
+#   fall_acceleration: 1.0
+
+# Theme: Hot Songs
+# background_color: "#1a0800"
+# bar_color: "#ff5a1f"
+# bar_difference_color: "#ffd166"
+# debug_fft_overlay_color: "#c44512"
+# high_water_line:
+#   color: "#fff3c4"
+#   fall_acceleration: 1.0
+
+# Theme: Cold Songs
+# background_color: "#06131f"
+# bar_color: "#5cc8ff"
+# bar_difference_color: "#d8f7ff"
+# debug_fft_overlay_color: "#2f7ea8"
+# high_water_line:
+#   color: "#f7fdff"
+#   fall_acceleration: 1.0
 
 alpha0: 0.75
 alpha1: 0.35
@@ -18,13 +136,20 @@ smoothing1:
   order: 0
 
 binning:
-  # C1 through the useful high-percussion/air band. Gamma 2.3 keeps
-  # low-end detail without making the high-frequency bins too wide to move.
+  # C1 through the useful high-percussion/air band. Gamma controls bar placement;
+  # compensation below handles the expected musical high-frequency rolloff.
   bins: 72
   fmin: 32.703
   fmax: 12000.0
-  gamma: 4
-  discrete_levels: 48
+  gamma: 5
+  discrete_levels: 52
+  compensation:
+    # 0.0 is average RMS density, 1.0 is total band energy.
+    bandwidth_weight: 0.5
+    # Music-like spectra commonly lose about 3 dB per octave.
+    spectral_tilt_db_per_octave: 3.0
+    tilt_reference_hz: 1000.0
+    max_adjustment_db: 18.0
 
 min_db: -53.0
-max_db: 8.0
+max_db: -5.0

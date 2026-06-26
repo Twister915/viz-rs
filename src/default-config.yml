@@ -2,7 +2,14 @@ fps: 150
 
 data_window_ms: 98
 
-bar_color: "#00ff00"
+background_color: "#d6ecfc"
+bar_color: "#4f9fd1"
+bar_difference_color: "#b9e7ff"
+debug_fft_overlay_color: "#5f87a5"
+
+high_water_line:
+  color: "#f8fcff"
+  fall_acceleration: 2.0
 
 alpha0: 0.75
 alpha1: 0.65
@@ -23,6 +30,11 @@ binning:
   fmax: 16000.0
   gamma: 2.3
   discrete_levels: 48
+  compensation:
+    bandwidth_weight: 0.5
+    spectral_tilt_db_per_octave: 3.0
+    tilt_reference_hz: 1000.0
+    max_adjustment_db: 18.0
 
 min_db: -72.0
 max_db: -12.0

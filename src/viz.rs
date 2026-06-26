@@ -1,10 +1,11 @@
+use crate::channeled::Channeled;
 use crate::framed::Framed;
 use crate::pipeline::{
-    create_debug_fft_pipeline, create_viz_pipeline, open_config_or_default, VizColor,
-    VizPipelineConfig,
+    VizColor, VizPipelineConfig, create_debug_fft_pipeline, create_viz_pipeline,
+    open_config_or_default,
 };
 use crate::player::WavPlayer;
-use crate::util::{log_timed, VizFloat};
+use crate::util::{VizFloat, log_timed};
 use crate::wav::WavFile;
 use anyhow::Result;
 use sdl2::event::{Event, WindowEvent};
@@ -15,6 +16,102 @@ use sdl2::render::WindowCanvas;
 use sdl2::video::FullscreenType;
 use std::ops::{Add, Sub};
 use std::time::{Duration, Instant};
+
+#[derive(Clone, Copy)]
+struct BarColors {
+    shared: VizColor,
+    difference: VizColor,
+}
+
+#[derive(Clone, Copy)]
+struct RenderStyle {
+    background_color: VizColor,
+    bars: BarColors,
+    debug_fft_overlay_color: VizColor,
+    high_water_color: VizColor,
+}
+
+#[derive(Debug, Default)]
+struct HighWaterLines {
+    lines: Vec<HighWaterLine>,
+    values: Vec<VizFloat>,
+}
+
+impl HighWaterLines {
+    fn values(&self) -> &[VizFloat] {
+        &self.values
+    }
+
+    fn reset(&mut self) {
+        for line in &mut self.lines {
+            line.reset();
+        }
+        self.values.iter_mut().for_each(|value| *value = 0.0);
+    }
+
+    fn update(
+        &mut self,
+        frame: &[Channeled<VizFloat>],
+        elapsed: Duration,
+        fall_acceleration: VizFloat,
+    ) -> &[VizFloat] {
+        self.lines.resize_with(frame.len(), HighWaterLine::default);
+        self.values.resize(frame.len(), 0.0);
+
+        for ((line, value), bar) in self
+            .lines
+            .iter_mut()
+            .zip(self.values.iter_mut())
+            .zip(frame.iter().copied())
+        {
+            *value = line.update(bar_heights(bar).peak, elapsed, fall_acceleration);
+        }
+
+        &self.values
+    }
+}
+
+#[derive(Debug, Default)]
+struct HighWaterLine {
+    value: VizFloat,
+    fall_velocity: VizFloat,
+}
+
+impl HighWaterLine {
+    fn reset(&mut self) {
+        self.value = 0.0;
+        self.fall_velocity = 0.0;
+    }
+
+    fn update(
+        &mut self,
+        pushed_to: VizFloat,
+        elapsed: Duration,
+        fall_acceleration: VizFloat,
+    ) -> VizFloat {
+        let pushed_to = normalized_bar_value(pushed_to);
+        if pushed_to >= self.value {
+            self.value = pushed_to;
+            self.fall_velocity = 0.0;
+            return self.value;
+        }
+
+        let elapsed = elapsed.as_secs_f64();
+        let fall_distance =
+            (self.fall_velocity * elapsed) + (0.5 * fall_acceleration * elapsed * elapsed);
+        self.fall_velocity += fall_acceleration * elapsed;
+
+        let next_value = self.value - fall_distance;
+        if next_value <= pushed_to {
+            self.value = pushed_to;
+            self.fall_velocity = 0.0;
+        } else {
+            self.value = normalized_bar_value(next_value);
+        }
+
+        self.value
+    }
+}
 
 pub fn visualize(file: &str) -> Result<()> {
     let sdl_context = sdl2::init().map_err(map_sdl_err)?;
@@ -27,7 +124,6 @@ pub fn visualize(file: &str) -> Result<()> {
         .build()?;
 
     let mut canvas = window.into_canvas().accelerated().build()?;
-    clear_canvas(&mut canvas);
 
     let (mut frames, mut debug_frames, config, wav_src) = log_timed(
         format!("setup visualizer math pipeline for {}", file),
@@ -36,6 +132,7 @@ pub fn visualize(file: &str) -> Result<()> {
     let mut wav_player = WavPlayer::new(sdl_context.audio().map_err(map_sdl_err)?, wav_src);
 
     let mut event_pump = sdl_context.event_pump().map_err(map_sdl_err)?;
+    let mouse_util = sdl_context.mouse();
 
     wav_player.play()?;
     let mut paused = false;
@@ -43,7 +140,18 @@ pub fn visualize(file: &str) -> Result<()> {
     let mut last_frame_for_ts: Option<Instant> = None;
     let frame_delta = Duration::new(0, (1_000_000_000u64 / config.fps) as u32);
     let frame_for_offset = config.data_window() / 2;
-    let bar_color = config.bar_color;
+    let render_style = RenderStyle {
+        background_color: config.background_color,
+        bars: BarColors {
+            shared: config.bar_color,
+            difference: config.bar_difference_color,
+        },
+        debug_fft_overlay_color: config.debug_fft_overlay_color,
+        high_water_color: config.high_water_line.color,
+    };
+    clear_canvas(&mut canvas, render_style.background_color);
+    let high_water_fall_acceleration = config.high_water_line.fall_acceleration;
+    let mut high_water_lines = HighWaterLines::default();
     let mut last_frame = Vec::new();
     let mut last_debug_frame = Vec::new();
     let mut redraw_cached_frame = false;
@@ -56,7 +164,10 @@ pub fn visualize(file: &str) -> Result<()> {
                 | Event::KeyDown {
                     keycode: Some(Keycode::Escape),
                     ..
-                } => return Ok(()),
+                } => {
+                    set_window_mouse_capture(&mut canvas, &mouse_util, false);
+                    return Ok(());
+                }
                 Event::KeyDown {
                     keycode: Some(Keycode::Right),
                     ..
@@ -68,6 +179,7 @@ pub fn visualize(file: &str) -> Result<()> {
                     wav_player.seek(amount_seek)?;
                     frames.seek_frame(frames_seek as isize)?;
                     debug_frames.seek_frame(frames_seek as isize)?;
+                    high_water_lines.reset();
                     last_frame_for_ts = Some(now.sub(frame_delta));
                 }
                 Event::KeyDown {
@@ -100,7 +212,7 @@ pub fn visualize(file: &str) -> Result<()> {
                     repeat: false,
                     ..
                 } => {
-                    toggle_desktop_fullscreen(&mut canvas)?;
+                    toggle_desktop_fullscreen(&mut canvas, &mouse_util)?;
                     redraw_cached_frame = true;
                 }
                 Event::Window {
@@ -125,7 +237,8 @@ pub fn visualize(file: &str) -> Result<()> {
                 &last_frame,
                 &last_debug_frame,
                 debug_fft_overlay,
-                bar_color,
+                render_style,
+                high_water_lines.values(),
             )?;
             std::thread::sleep(frame_delta);
             continue;
@@ -166,7 +279,8 @@ pub fn visualize(file: &str) -> Result<()> {
                     &last_frame,
                     &last_debug_frame,
                     debug_fft_overlay,
-                    bar_color,
+                    render_style,
+                    high_water_lines.values(),
                 )?;
                 std::thread::sleep(frame_delta);
             } else {
@@ -179,7 +293,8 @@ pub fn visualize(file: &str) -> Result<()> {
                             &last_frame,
                             &last_debug_frame,
                             debug_fft_overlay,
-                            bar_color,
+                            render_style,
+                            high_water_lines.values(),
                         )?;
                     }
                     match (frames.next_frame()?, debug_frames.next_frame()?) {
@@ -195,7 +310,18 @@ pub fn visualize(file: &str) -> Result<()> {
                                 } else {
                                     None
                                 };
-                                draw_frame(&mut canvas, &last_frame, debug_frame, bar_color)?;
+                                let high_water_values = high_water_lines.update(
+                                    &last_frame,
+                                    frame_delta,
+                                    high_water_fall_acceleration,
+                                );
+                                draw_frame(
+                                    &mut canvas,
+                                    &last_frame,
+                                    debug_frame,
+                                    render_style,
+                                    high_water_values,
+                                )?;
                             }
                         }
                         _ => {
@@ -212,23 +338,39 @@ pub fn visualize(file: &str) -> Result<()> {
                 &last_frame,
                 &last_debug_frame,
                 debug_fft_overlay,
-                bar_color,
+                render_style,
+                high_water_lines.values(),
             )?;
             last_frame_for_ts = Some(now.add(frame_for_offset));
         }
     }
 }
 
-fn toggle_desktop_fullscreen(canvas: &mut WindowCanvas) -> Result<()> {
-    let fullscreen_target = match canvas.window().fullscreen_state() {
-        FullscreenType::Off => FullscreenType::Desktop,
-        FullscreenType::Desktop | FullscreenType::True => FullscreenType::Off,
+fn toggle_desktop_fullscreen(
+    canvas: &mut WindowCanvas,
+    mouse_util: &sdl2::mouse::MouseUtil,
+) -> Result<()> {
+    let (fullscreen_target, grab_mouse) = match canvas.window().fullscreen_state() {
+        FullscreenType::Off => (FullscreenType::Desktop, true),
+        FullscreenType::Desktop | FullscreenType::True => (FullscreenType::Off, false),
     };
 
     canvas
         .window_mut()
         .set_fullscreen(fullscreen_target)
-        .map_err(map_sdl_err)
+        .map_err(map_sdl_err)?;
+    set_window_mouse_capture(canvas, mouse_util, grab_mouse);
+
+    Ok(())
+}
+
+fn set_window_mouse_capture(
+    canvas: &mut WindowCanvas,
+    mouse_util: &sdl2::mouse::MouseUtil,
+    enabled: bool,
+) {
+    canvas.window_mut().set_mouse_grab(enabled);
+    mouse_util.show_cursor(!enabled);
 }
 
 fn initial_window_size(video_subsystem: &sdl2::VideoSubsystem) -> (u32, u32) {
@@ -259,7 +401,7 @@ fn scale_initial_window_dimension(display_dimension: u32) -> u32 {
 fn create_data_src(
     file: &str,
 ) -> Result<(
-    impl Framed<Item = VizFloat>,
+    impl Framed<Item = Channeled<VizFloat>>,
     impl Framed<Item = VizFloat>,
     VizPipelineConfig,
     WavFile,
@@ -277,21 +419,22 @@ fn create_data_src(
     ))
 }
 
-fn clear_canvas(canvas: &mut WindowCanvas) {
-    canvas.set_draw_color(Color::BLACK);
+fn clear_canvas(canvas: &mut WindowCanvas, color: VizColor) {
+    canvas.set_draw_color(to_sdl_color(color));
     canvas.clear();
     canvas.present();
 }
 
 fn draw_cached_frame(
     canvas: &mut WindowCanvas,
-    frame: &[VizFloat],
+    frame: &[Channeled<VizFloat>],
     debug_frame: &[VizFloat],
     debug_fft_overlay: bool,
-    bar_color: VizColor,
+    render_style: RenderStyle,
+    high_water_values: &[VizFloat],
 ) -> Result<()> {
     if frame.is_empty() {
-        clear_canvas(canvas);
+        clear_canvas(canvas, render_style.background_color);
         return Ok(());
     }
 
@@ -300,37 +443,46 @@ fn draw_cached_frame(
     } else {
         None
     };
-    draw_frame(canvas, frame, debug_frame, bar_color)
+    draw_frame(canvas, frame, debug_frame, render_style, high_water_values)
 }
 
 fn redraw_cached_frame_if_needed(
     redraw_cached_frame: &mut bool,
     canvas: &mut WindowCanvas,
-    frame: &[VizFloat],
+    frame: &[Channeled<VizFloat>],
     debug_frame: &[VizFloat],
     debug_fft_overlay: bool,
-    bar_color: VizColor,
+    render_style: RenderStyle,
+    high_water_values: &[VizFloat],
 ) -> Result<()> {
     if *redraw_cached_frame {
         *redraw_cached_frame = false;
-        draw_cached_frame(canvas, frame, debug_frame, debug_fft_overlay, bar_color)?;
+        draw_cached_frame(
+            canvas,
+            frame,
+            debug_frame,
+            debug_fft_overlay,
+            render_style,
+            high_water_values,
+        )?;
     }
     Ok(())
 }
 
 fn draw_frame(
     canvas: &mut WindowCanvas,
-    frame: &[VizFloat],
+    frame: &[Channeled<VizFloat>],
     debug_fft_overlay: Option<&[VizFloat]>,
-    bar_color: VizColor,
+    render_style: RenderStyle,
+    high_water_values: &[VizFloat],
 ) -> Result<()> {
     const BIN_MARGIN: u32 = 3;
     const MIN_HEIGHT: u32 = 4;
+    const HIGH_WATER_LINE_HEIGHT: u32 = 1;
 
-    canvas.set_draw_color(Color::BLACK);
+    canvas.set_draw_color(to_sdl_color(render_style.background_color));
     canvas.clear();
     let (width, height) = canvas.output_size().map_err(map_sdl_err)?;
-    canvas.set_draw_color(to_sdl_color(bar_color));
 
     let avail_height = height.saturating_sub(BIN_MARGIN * 2);
     let n_bins = frame.len() as u32;
@@ -346,26 +498,31 @@ fn draw_frame(
             continue;
         };
 
-        let v = frame[i as usize];
-        let v = if v.is_finite() {
-            v.clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
-        let mut ty = ((1.0 - v) * (avail_height as VizFloat)) as u32;
-        if ty < MIN_HEIGHT {
-            ty = MIN_HEIGHT
-        }
-
-        let by = avail_height;
-
-        let x = lx as i32;
-        let y = ty as i32;
         let width = rx.saturating_sub(lx);
-        let height = by.saturating_sub(ty) + 1;
+        draw_bar(
+            canvas,
+            frame[i as usize],
+            lx,
+            width,
+            avail_height,
+            MIN_HEIGHT,
+            render_style.bars,
+        )?;
 
-        let rect = Rect::new(x, y, width, height);
-        canvas.fill_rect(rect).map_err(map_sdl_err)?;
+        let high_water_value = high_water_values
+            .get(i as usize)
+            .copied()
+            .unwrap_or_else(|| bar_heights(frame[i as usize]).peak);
+        draw_high_water_line(
+            canvas,
+            high_water_value,
+            lx,
+            width,
+            avail_height,
+            MIN_HEIGHT,
+            HIGH_WATER_LINE_HEIGHT,
+            render_style.high_water_color,
+        )?;
     }
 
     if let Some(debug_fft_overlay) = debug_fft_overlay {
@@ -376,11 +533,112 @@ fn draw_frame(
             BIN_MARGIN,
             bar_area_width,
             avail_height,
+            render_style.debug_fft_overlay_color,
         )?;
     }
 
     canvas.present();
     Ok(())
+}
+
+fn draw_bar(
+    canvas: &mut WindowCanvas,
+    value: Channeled<VizFloat>,
+    x: u32,
+    width: u32,
+    avail_height: u32,
+    min_top_y: u32,
+    colors: BarColors,
+) -> Result<()> {
+    let heights = bar_heights(value);
+    let shared_top = bar_top_y(heights.shared, avail_height, min_top_y);
+    let peak_top = bar_top_y(heights.peak, avail_height, min_top_y);
+    let bottom = avail_height.saturating_add(1);
+
+    canvas.set_draw_color(to_sdl_color(colors.shared));
+    fill_bar_segment(canvas, x, width, shared_top, bottom)?;
+
+    if heights.peak > heights.shared {
+        canvas.set_draw_color(to_sdl_color(colors.difference));
+        fill_bar_segment(canvas, x, width, peak_top, shared_top)?;
+    }
+
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct BarHeights {
+    shared: VizFloat,
+    peak: VizFloat,
+}
+
+fn bar_heights(value: Channeled<VizFloat>) -> BarHeights {
+    use Channeled::*;
+    match value {
+        Mono(v) => {
+            let v = normalized_bar_value(v);
+            BarHeights { shared: v, peak: v }
+        }
+        Stereo(left, right) => {
+            let left = normalized_bar_value(left);
+            let right = normalized_bar_value(right);
+            BarHeights {
+                shared: left.min(right),
+                peak: left.max(right),
+            }
+        }
+    }
+}
+
+fn normalized_bar_value(v: VizFloat) -> VizFloat {
+    if v.is_finite() {
+        v.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
+fn bar_top_y(value: VizFloat, avail_height: u32, min_top_y: u32) -> u32 {
+    let top = ((1.0 - value) * (avail_height as VizFloat)) as u32;
+    top.max(min_top_y)
+}
+
+fn fill_bar_segment(
+    canvas: &mut WindowCanvas,
+    x: u32,
+    width: u32,
+    top: u32,
+    bottom: u32,
+) -> Result<()> {
+    if width == 0 || bottom <= top {
+        return Ok(());
+    }
+
+    let rect = Rect::new(x as i32, top as i32, width, bottom - top);
+    canvas.fill_rect(rect).map_err(map_sdl_err)
+}
+
+fn draw_high_water_line(
+    canvas: &mut WindowCanvas,
+    value: VizFloat,
+    x: u32,
+    width: u32,
+    avail_height: u32,
+    min_top_y: u32,
+    line_height: u32,
+    color: VizColor,
+) -> Result<()> {
+    if width == 0 || line_height == 0 {
+        return Ok(());
+    }
+
+    let top = bar_top_y(normalized_bar_value(value), avail_height, min_top_y);
+    let bottom = top
+        .saturating_add(line_height)
+        .min(avail_height.saturating_add(1));
+
+    canvas.set_draw_color(to_sdl_color(color));
+    fill_bar_segment(canvas, x, width, top, bottom)
 }
 
 fn bar_bounds(i: u32, n_bins: u32, bin_margin: u32, bar_area_width: u32) -> Option<(u32, u32)> {
@@ -404,12 +662,13 @@ fn draw_debug_fft_overlay(
     bin_margin: u32,
     bar_area_width: u32,
     avail_height: u32,
+    color: VizColor,
 ) -> Result<()> {
     let Some((min, max)) = finite_range(frame) else {
         return Ok(());
     };
 
-    canvas.set_draw_color(Color::RGB(255, 48, 48));
+    canvas.set_draw_color(to_sdl_color(color));
     let point_count = frame.len().min(n_bins as usize);
     let mut prev = None;
     for (idx, v) in frame.iter().copied().take(point_count).enumerate() {
@@ -459,4 +718,89 @@ fn scale_debug_y(v: VizFloat, min: VizFloat, max: VizFloat, avail_height: u32) -
 
 fn map_sdl_err(err: String) -> anyhow::Error {
     anyhow::anyhow!("sdl2: {}", err)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mono_bar_uses_one_height_for_shared_and_peak() {
+        assert_eq!(
+            bar_heights(Channeled::Mono(0.5)),
+            BarHeights {
+                shared: 0.5,
+                peak: 0.5,
+            }
+        );
+    }
+
+    #[test]
+    fn stereo_bar_splits_shared_and_difference_heights() {
+        assert_eq!(
+            bar_heights(Channeled::Stereo(0.25, 0.75)),
+            BarHeights {
+                shared: 0.25,
+                peak: 0.75,
+            }
+        );
+    }
+
+    #[test]
+    fn bar_heights_clamp_non_display_values() {
+        assert_eq!(
+            bar_heights(Channeled::Stereo(VizFloat::NAN, 1.5)),
+            BarHeights {
+                shared: 0.0,
+                peak: 1.0,
+            }
+        );
+    }
+
+    #[test]
+    fn high_water_line_is_pushed_up_immediately() {
+        let mut line = HighWaterLine::default();
+
+        let value = line.update(0.8, Duration::from_secs_f64(0.25), 2.0);
+
+        assert_eq!(value, 0.8);
+        assert_eq!(line.fall_velocity, 0.0);
+    }
+
+    #[test]
+    fn high_water_line_falls_with_acceleration() {
+        let mut line = HighWaterLine::default();
+        line.update(0.8, Duration::ZERO, 2.0);
+
+        let value = line.update(0.0, Duration::from_secs_f64(0.5), 2.0);
+
+        assert!((value - 0.55).abs() < 1e-12);
+        assert!((line.fall_velocity - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn high_water_line_lands_on_current_peak() {
+        let mut line = HighWaterLine::default();
+        line.update(0.8, Duration::ZERO, 2.0);
+
+        let value = line.update(0.75, Duration::from_secs_f64(1.0), 2.0);
+
+        assert_eq!(value, 0.75);
+        assert_eq!(line.fall_velocity, 0.0);
+    }
+
+    #[test]
+    fn high_water_lines_track_each_bar_independently() {
+        let mut lines = HighWaterLines::default();
+        let frame = [Channeled::Mono(0.25), Channeled::Stereo(0.8, 0.2)];
+
+        let values = lines.update(&frame, Duration::ZERO, 2.0);
+
+        assert_eq!(values, &[0.25, 0.8]);
+
+        let frame = [Channeled::Mono(0.0), Channeled::Stereo(0.7, 0.4)];
+        let values = lines.update(&frame, Duration::from_secs_f64(0.5), 2.0);
+
+        assert_eq!(values, &[0.0, 0.7]);
+    }
 }
