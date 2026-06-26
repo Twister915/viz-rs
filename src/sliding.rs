@@ -2,20 +2,18 @@ use crate::delegate_impls;
 use crate::framed::{Framed, Samples};
 use crate::util::try_use_iter;
 use anyhow::Result;
-use serde::export::PhantomData;
 
-pub struct SlidingFrame<S, T, I> {
+pub struct SlidingFrame<S, T> {
     source: S,
     buf: Vec<T>,
     cur_buf: Vec<T>,
     size: usize,
     stride: usize,
-    _inner_typ: PhantomData<I>,
 }
 
-impl<S, T, I> SlidingFrame<S, T, I>
+impl<S, T> SlidingFrame<S, T>
 where
-    S: Samples<T, I>,
+    S: Samples<Item = T>,
 {
     pub fn new(source: S, size: usize, mut stride: usize) -> Self {
         if stride == 0 {
@@ -27,37 +25,36 @@ where
             cur_buf: Vec::with_capacity(size),
             size,
             stride,
-            _inner_typ: PhantomData,
         }
     }
 }
 
-impl<S, T, I> Framed<T, I> for SlidingFrame<S, T, I>
+impl<S, T> Framed for SlidingFrame<S, T>
 where
-    S: Samples<T, I>,
+    S: Samples<Item = T>,
     T: Copy,
 {
-    fn into_deep_inner(self) -> I {
-        self.source.into_deep_inner()
-    }
+    type Item = T;
 
     fn seek_frame(&mut self, n: isize) -> Result<()> {
-        if n < 0 {
+        let sample_delta = n.saturating_mul(self.stride as isize);
+        if sample_delta < 0 {
+            let buf_len = self.buf.len() as isize;
+            self.buf.clear();
+            self.source.seek_samples(sample_delta - buf_len)?;
+        } else if sample_delta > 0 {
             let buf_len = self.buf.len();
-            let to_remove = std::cmp::min(buf_len, -n as usize);
-            let first_remove = buf_len - to_remove;
-            self.buf.drain(first_remove..buf_len);
-        } else if n > 0 {
-            let buf_len = self.buf.len();
-            let to_remove = std::cmp::min(buf_len, n as usize);
+            let to_remove = std::cmp::min(buf_len, sample_delta as usize);
             self.buf.drain(0..to_remove);
+            if to_remove < sample_delta as usize {
+                self.source
+                    .seek_samples((sample_delta as usize - to_remove) as isize)?;
+            }
         }
-
-        self.source.seek_samples(n)?;
         Ok(())
     }
 
-    fn next_frame(&mut self) -> Result<Option<&mut [T]>> {
+    fn next_frame(&mut self) -> Result<Option<&mut [Self::Item]>> {
         if !self.buf.is_empty() {
             if self.buf.len() < self.stride {
                 self.buf.clear();
@@ -78,34 +75,16 @@ where
         Ok(Some(self.cur_buf.as_mut_slice()))
     }
 
-    fn num_frames(&self) -> usize {
-        self.source.num_samples() / self.stride
-    }
-
-    fn num_frames_remain(&self) -> usize {
-        self.source.num_samples_remain() / self.stride
-    }
-
-    fn num_full_frames(&self) -> usize {
-        let samples = self.source.num_samples();
-        let non_full_samples = self.size - 1;
-        if non_full_samples > samples {
-            0
-        } else {
-            (samples - non_full_samples) / self.stride
-        }
-    }
-
     fn full_frame_size(&self) -> usize {
         self.size
     }
 }
 
-delegate_impls!(SlidingFrame<S, T, I>, S, source);
+delegate_impls!(SlidingFrame<S, T>, S, source);
 
-impl<S, T, I> SlidingFrame<S, T, I>
+impl<S, T> SlidingFrame<S, T>
 where
-    S: Samples<T, I>,
+    S: Samples<Item = T>,
     T: Copy,
 {
     fn ensure_buf_filled(&mut self) -> Result<()> {
@@ -118,12 +97,7 @@ where
 
         try_use_iter(
             std::iter::repeat_with(|| source.next_sample()).take(n_load),
-            move |iter| {
-                buf.extend(
-                    iter.take_while(move |v| v.is_some())
-                        .map(move |v| v.unwrap()),
-                )
-            },
+            move |iter| buf.extend(iter.take_while(move |v| v.is_some()).flatten()),
         )
     }
 }

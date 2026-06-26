@@ -1,7 +1,7 @@
 use crate::channeled::Channeled;
 use crate::framed::FramedMapper;
-use crate::util::{log_timed, slice_copy_from, VizFloat, VizComplex, VizFftPlan};
-use anyhow::{anyhow, Result};
+use crate::util::{VizComplex, VizFftPlan, VizFloat, log_timed, slice_copy_from};
+use anyhow::{Result, anyhow};
 use fftw::array::AlignedVec;
 use fftw::plan::R2CPlan;
 use fftw::types::Flag;
@@ -45,21 +45,24 @@ impl FramedFft {
     }
 }
 
-impl FramedMapper<Channeled<VizFloat>, Channeled<VizFloat>> for FramedFft {
+impl FramedMapper for FramedFft {
+    type Input = Channeled<VizFloat>;
+    type Output = Channeled<VizFloat>;
+
     fn map<'a>(
         &'a mut self,
         input: &'a mut [Channeled<VizFloat>],
     ) -> Result<Option<&'a mut [Channeled<VizFloat>]>> {
+        if input.is_empty() {
+            return Ok(Some(input));
+        }
+
         // lazily setup the bufs
-        let bufs = if let Some(buf) = self.bufs.as_mut() {
-            buf
-        } else {
+        let bufs = self.bufs.get_or_insert_with(|| {
             // stereo needs two bufs, mono needs one buf, so this map will handle creating one for
             // each, depending on whether or not input[0] is mono or stereo
-            let created = (&input[0]).map(|_| Bufs::new(self.n_in));
-            self.bufs = Some(created);
-            self.bufs.as_mut().unwrap()
-        };
+            input[0].map(|_| Bufs::new(self.n_in))
+        });
 
         // load input into the buffers:
         bufs.as_mut_ref()
@@ -76,11 +79,7 @@ impl FramedMapper<Channeled<VizFloat>, Channeled<VizFloat>> for FramedFft {
         let input_len = input.len();
         bufs.as_mut_ref()
             .map(move |v| &mut v.input)
-            .for_each(move |input| {
-                (&mut input[input_len..])
-                    .iter_mut()
-                    .for_each(move |t| *t = 0.0)
-            });
+            .for_each(move |input| input[input_len..].iter_mut().for_each(move |t| *t = 0.0));
 
         let plan = &mut self.plan;
 

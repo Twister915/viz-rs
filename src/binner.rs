@@ -1,30 +1,35 @@
 use crate::channeled::Channeled;
 use crate::framed::FramedMapper;
-use crate::util::{log_timed, VizFloat};
+use crate::util::{VizFloat, log_timed};
 use anyhow::Result;
 
 pub struct Binner {
     indexes: Vec<usize>,
     n_bins: usize,
     in_size: usize,
+    out: Vec<Channeled<VizFloat>>,
 }
 
 impl Binner {
     pub fn new(config: BinConfig) -> Self {
-        log_timed(format!("compute bin constants for {:?}", &config), || {
-            let indexes = compute_bin_indexes(&config, config.bins);
+        log_timed(format!("compute bin constants for {:?}", config), || {
+            let indexes = compute_bin_indexes(&config);
             let n_bins = indexes.len() - 1;
             let in_size = config.input_size;
             Self {
                 indexes,
                 n_bins,
                 in_size,
+                out: Vec::with_capacity(n_bins),
             }
         })
     }
 }
 
-impl FramedMapper<Channeled<VizFloat>, Channeled<VizFloat>> for Binner {
+impl FramedMapper for Binner {
+    type Input = Channeled<VizFloat>;
+    type Output = Channeled<VizFloat>;
+
     fn map<'a>(
         &'a mut self,
         input: &'a mut [Channeled<VizFloat>],
@@ -33,50 +38,41 @@ impl FramedMapper<Channeled<VizFloat>, Channeled<VizFloat>> for Binner {
             return Ok(None);
         }
 
-        let mut bin_idx = 0usize;
-        let idx_slice = self.indexes.as_slice();
-        let mut zeroed_bin_idx = 0;
-        for idx in 0..self.in_size {
-            let elem = input[idx];
-            let this_bin_start_at = &idx_slice[bin_idx];
-            if idx < *this_bin_start_at {
+        if input.is_empty() {
+            return Ok(None);
+        }
+
+        let zero = input[0].map(move |_| 0.0);
+        self.out.clear();
+        self.out.resize(self.n_bins, zero);
+
+        for bin_idx in 0..self.n_bins {
+            let start = self.indexes[bin_idx].min(input.len());
+            let end = self.indexes[bin_idx + 1].min(input.len());
+            if start >= end {
                 continue;
             }
 
-            let next_bin_start_at = &idx_slice[bin_idx + 1];
-            if idx >= *next_bin_start_at {
-                bin_idx += 1;
+            let mut count = 0usize;
+            let mut power_sum = zero;
+            for elem in input[start..end].iter().copied() {
+                if elem.map(move |elem| elem.is_finite()).and() {
+                    let power = elem.map(move |v| v * v);
+                    power_sum = power_sum
+                        .zip(power)
+                        .expect("mixed stereo/mono?")
+                        .map(move |(sum, v)| sum + v);
+                    count += 1;
+                }
             }
 
-            if bin_idx >= self.n_bins {
-                break;
-            }
-
-            if elem.map(move |elem| elem.is_finite()).and() {
-                if bin_idx > idx {
-                    panic!(
-                        "can't use bin_idx in input slice {} is bin but idx avail is {}",
-                        bin_idx, idx
-                    )
-                }
-
-                while zeroed_bin_idx <= bin_idx {
-                    input[zeroed_bin_idx] = elem.map(move |_| 0.0);
-                    zeroed_bin_idx += 1;
-                }
-
-                input[bin_idx] = input[bin_idx]
-                    .zip(elem)
-                    .expect("mixed stereo/mono?")
-                    .map(move |(c, v)| c + v);
+            if count != 0 {
+                let count = count as VizFloat;
+                self.out[bin_idx] = power_sum.map(move |v| (v / count).sqrt());
             }
         }
 
-        let in_size = self.in_size as VizFloat;
-        input
-            .iter_mut()
-            .for_each(move |e| e.as_mut_ref().for_each(move |v| *v /= in_size));
-        Ok(Some(&mut input[..bin_idx]))
+        Ok(Some(self.out.as_mut_slice()))
     }
 
     fn map_frame_size(&self, _: usize) -> usize {
@@ -94,97 +90,159 @@ pub struct BinConfig {
     pub gamma: VizFloat,
 }
 
-fn compute_bin_indexes(config: &BinConfig, num_bins: usize) -> Vec<usize> {
-    let total_max_freq = (config.sample_rate as VizFloat) / 2.0;
-    let bandwidth_per_src_bin = total_max_freq / (config.input_size as VizFloat);
-    let gamma_inv = 1.0 / config.gamma;
-    let n_bins = num_bins as VizFloat;
-    let freq_range = config.fmax - config.fmin;
-    let mut out = vec![None; num_bins + 1];
-    let hz_for_idx = move |idx: usize| (idx as VizFloat) * bandwidth_per_src_bin;
-    for i in 0..config.input_size {
-        let f_start = hz_for_idx(i);
-        if f_start < config.fmin {
-            continue;
-        }
-
-        let mut bin_idx =
-            (((f_start - config.fmin) / freq_range).powf(gamma_inv) * n_bins).round() as isize;
-        if bin_idx < 0 {
-            continue;
-        }
-
-        let is_last = bin_idx >= (num_bins as isize);
-        if is_last {
-            bin_idx = num_bins as isize;
-        }
-
-        let bin_idx = bin_idx as usize;
-        match &mut out[bin_idx] {
-            Some(existing) => {
-                if *existing > i {
-                    *existing = i;
-                }
-            }
-            None => {
-                out[bin_idx] = Some(i);
-            }
-        }
-
-        if is_last {
-            break;
-        }
+fn compute_bin_indexes(config: &BinConfig) -> Vec<usize> {
+    if config.input_size == 0 || config.bins == 0 {
+        return vec![0];
     }
 
-    let mut has_any = false;
-    let mut fin_out = Vec::with_capacity(out.len());
-    for (idx, elem) in out.drain(..).enumerate() {
-        if let Some(v) = elem {
-            fin_out.push(v);
-            has_any = true;
-        } else if has_any {
-            panic!("did not discover good range for bin {}", idx)
+    let nyquist = (config.sample_rate as VizFloat) / 2.0;
+    let bandwidth_per_src_bin = nyquist / (config.input_size as VizFloat);
+    let fmin = config.fmin.max(0.0).min(nyquist);
+    let fmax = config.fmax.max(fmin).min(nyquist);
+    let idx_for_edge = move |hz: VizFloat| -> usize {
+        if hz >= nyquist {
+            config.input_size
+        } else if hz <= bandwidth_per_src_bin {
+            0
+        } else {
+            ((hz / bandwidth_per_src_bin).ceil() as usize)
+                .saturating_sub(1)
+                .min(config.input_size)
         }
+    };
+
+    let mut start = idx_for_edge(fmin);
+    if start >= config.input_size {
+        start = config.input_size - 1;
     }
 
-    let n_bins_out = fin_out.len() - 1;
-    if n_bins_out < config.bins {
+    let mut end = idx_for_edge(fmax);
+    if end <= start {
+        end = (start + 1).min(config.input_size);
+    }
+
+    let available_bins = end.saturating_sub(start);
+    let n_bins = config.bins.min(available_bins.max(1));
+    if n_bins < config.bins {
         println!(
-            "use {} bins for {} desired bins (have {} bins with {})",
-            num_bins + 1,
-            config.bins,
-            n_bins_out,
-            num_bins,
+            "using {} bins for {} desired bins; only {} FFT bins are available in range",
+            n_bins, config.bins, available_bins
         );
-        compute_bin_indexes(config, num_bins + 1)
-    } else {
-        let sizes = fin_out
-            .windows(2)
-            .map(move |win| win[1] - win[0])
-            .collect::<Vec<usize>>();
+    }
 
-        sizes
-            .iter()
-            .copied()
-            .zip(
-                fin_out
-                    .windows(2)
-                    .map(move |win| ((win[0], hz_for_idx(win[0])), (win[1], hz_for_idx(win[1])))),
+    let mut out = Vec::with_capacity(n_bins + 1);
+    for bin in 0..=n_bins {
+        let idx = if bin == 0 {
+            start
+        } else if bin == n_bins {
+            end
+        } else {
+            let t = (bin as VizFloat) / (n_bins as VizFloat);
+            let hz = fmin + ((fmax - fmin) * t.powf(config.gamma));
+            idx_for_edge(hz)
+        };
+        out.push(idx.min(config.input_size));
+    }
+
+    out[0] = start;
+    out[n_bins] = end;
+    for idx in 1..n_bins {
+        let min_idx = out[idx - 1] + 1;
+        let max_idx = end - (n_bins - idx);
+        out[idx] = out[idx].max(min_idx).min(max_idx);
+    }
+
+    let hz_for_idx = move |idx: usize| ((idx + 1) as VizFloat) * bandwidth_per_src_bin;
+    let sizes = out
+        .windows(2)
+        .map(move |win| win[1] - win[0])
+        .collect::<Vec<usize>>();
+
+    sizes
+        .iter()
+        .copied()
+        .zip(out.windows(2).map(move |win| {
+            let from = win[0];
+            let to = win[1];
+            let from_hz = hz_for_idx(from.min(config.input_size - 1));
+            let to_hz = if to == 0 {
+                0.0
+            } else {
+                hz_for_idx((to - 1).min(config.input_size - 1))
+            };
+            ((from, from_hz), (to, to_hz))
+        }))
+        .enumerate()
+        .for_each(move |(idx, (size, ((from, from_hz), (to, to_hz))))| {
+            println!(
+                "bin[{}] size={} :: {}..{} {:.2}Hz..{:.2}Hz",
+                idx, size, from, to, from_hz, to_hz,
             )
-            .enumerate()
-            .for_each(move |(idx, (size, ((from, from_hz), (to, to_hz))))| {
-                println!(
-                    "bin[{}] size={} :: {}..{} {:.2}Hz..{:.2}Hz",
-                    idx, size, from, to, from_hz, to_hz,
-                )
-            });
+        });
 
-        let total_size = sizes.iter().copied().sum::<usize>();
-        println!(
-            "total size :: {} (/ {}) -> {}",
-            total_size, config.input_size, n_bins_out
+    let total_size = sizes.iter().copied().sum::<usize>();
+    println!(
+        "total size :: {} (/ {}) -> {}",
+        total_size, config.input_size, n_bins
+    );
+
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::framed::FramedMapper;
+
+    #[test]
+    fn bin_indexes_account_for_skipped_dc_bin() {
+        let indexes = compute_bin_indexes(&BinConfig {
+            bins: 2,
+            input_size: 4,
+            sample_rate: 8,
+            fmin: 2.0,
+            fmax: 4.0,
+            gamma: 1.0,
+        });
+
+        assert_eq!(indexes, vec![1, 2, 4]);
+    }
+
+    #[test]
+    fn bins_are_rms_averaged_by_their_own_width() {
+        let mut binner = Binner::new(BinConfig {
+            bins: 2,
+            input_size: 4,
+            sample_rate: 8,
+            fmin: 1.0,
+            fmax: 4.0,
+            gamma: 1.0,
+        });
+        let mut input = [
+            Channeled::Mono(1.0),
+            Channeled::Mono(1.0),
+            Channeled::Mono(3.0),
+            Channeled::Mono(3.0),
+        ];
+
+        let out = binner.map(&mut input).unwrap().unwrap();
+
+        assert_eq!(out.len(), 2);
+        assert!(
+            (match out[0] {
+                Channeled::Mono(v) => v,
+                Channeled::Stereo(_, _) => panic!("expected mono"),
+            } - 1.0)
+                .abs()
+                < 1e-12
         );
-
-        fin_out
+        assert!(
+            (match out[1] {
+                Channeled::Mono(v) => v,
+                Channeled::Stereo(_, _) => panic!("expected mono"),
+            } - 3.0)
+                .abs()
+                < 1e-12
+        );
     }
 }

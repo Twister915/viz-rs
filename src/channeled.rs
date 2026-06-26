@@ -1,6 +1,6 @@
 use anyhow::Result;
 use std::fmt;
-use std::iter::{FusedIterator, TrustedLen};
+use std::iter::FusedIterator;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Channeled<T> {
@@ -51,7 +51,7 @@ impl<T> Channeled<T> {
 
     pub fn for_each<F>(self, f: F)
     where
-        F: FnMut(T) -> (),
+        F: FnMut(T),
     {
         self.map(f);
     }
@@ -77,7 +77,7 @@ impl<T> Channeled<T> {
         match (self, other) {
             (Stereo(al, ar), Stereo(bl, br)) => Some(Stereo((al, bl), (ar, br))),
             (Mono(a), Mono(b)) => Some(Mono((a, b))),
-            _ => None
+            _ => None,
         }
     }
 }
@@ -132,7 +132,7 @@ where
         match self.iters.as_mut_ref().map(move |v| v.next()) {
             Stereo(Some(vl), Some(vr)) => Some(Stereo(vl, vr)),
             Mono(Some(v)) => Some(Mono(v)),
-            _ => None
+            _ => None,
         }
     }
 
@@ -151,8 +151,6 @@ where
         }
     }
 }
-
-unsafe impl<I> TrustedLen for ChanneledIter<I> where I: Iterator + TrustedLen {}
 
 impl<I> ExactSizeIterator for ChanneledIter<I> where I: Iterator + ExactSizeIterator {}
 

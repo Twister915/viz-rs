@@ -32,7 +32,7 @@ where
 pub fn try_use_iter<I, T, F>(source: I, mut consumer: F) -> Result<()>
 where
     I: Iterator<Item = Result<T>>,
-    F: for<'a> FnMut(&'a mut TryUseValueIter<I>) -> (),
+    F: for<'a> FnMut(&'a mut TryUseValueIter<I>),
 {
     let mut out = TryUseValueIter { source, err: None };
     consumer(&mut out);

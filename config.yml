@@ -1,26 +1,30 @@
 fps: 150
 
-data_window_ms: 96
+data_window_ms: 72
+
+bar_color: "#ffafcc"
 
 alpha0: 0.75
-alpha1: 0.65
+alpha1: 0.35
 
 smoothing0:
-  window_size: 37
-  degree: 6
+  window_size: 7
+  degree: 3
   order: 0
 
 smoothing1:
-  window_size: 49
-  degree: 9
+  window_size: 9
+  degree: 3
   order: 0
 
 binning:
-  bins: 49
-  fmin: 42.0
-  fmax: 16000.0
-  gamma: 2.3
+  # C1 through the useful high-percussion/air band. Gamma 2.3 keeps
+  # low-end detail without making the high-frequency bins too wide to move.
+  bins: 72
+  fmin: 32.703
+  fmax: 12000.0
+  gamma: 4
   discrete_levels: 48
 
-min_db: -32.0
-max_db: -12.5
+min_db: -53.0
+max_db: 8.0

@@ -70,13 +70,12 @@
 ///
 use crate::channeled::Channeled;
 use crate::framed::FramedMapper;
-use crate::util::{log_timed, VizFloat};
+use crate::util::{VizFloat, log_timed};
 use anyhow::Result;
-use itertools::Itertools;
 use num_rational::Rational64;
 use rayon::prelude::*;
 use serde::Deserialize;
-use std::iter::{FusedIterator, TrustedLen};
+use std::iter::FusedIterator;
 
 // thanks to: https://github.com/arntanguy/gram_savitzky_golay/tree/master/src
 // thanks to: https://github.com/mirkov/savitzky-golay/blob/master/gram-poly.lisp
@@ -127,7 +126,7 @@ fn weight(i: Rational64, t: Rational64, m: Rational64, n: Rational64, s: Rationa
 fn weights(m: i64, t: Rational64, n: Rational64, s: Rational64) -> Vec<(VizFloat, VizFloat)> {
     (0..((2 * m) + 1))
         .into_par_iter()
-        .map(move |i| weight(((i - m) as i64).into(), t, (m as i64).into(), n, s))
+        .map(move |i| weight((i - m).into(), t, m.into(), n, s))
         .map(move |f| f.reduced())
         .map(move |f| (*f.numer() as VizFloat, *f.denom() as VizFloat))
         .collect::<Vec<_>>()
@@ -176,7 +175,6 @@ impl SavitzkyGolayConfig {
 #[derive(Debug)]
 pub struct SavitzkyGolayMapper {
     buf: Vec<Channeled<VizFloat>>,
-    cap: usize,
     coefficients: Vec<Vec<(VizFloat, VizFloat)>>,
 }
 
@@ -184,13 +182,15 @@ impl SavitzkyGolayMapper {
     fn new(size: usize, config: SavitzkyGolayConfig) -> Self {
         Self {
             buf: Vec::with_capacity(size),
-            cap: size,
             coefficients: config.compute_coefficients(),
         }
     }
 }
 
-impl FramedMapper<Channeled<VizFloat>, Channeled<VizFloat>> for SavitzkyGolayMapper {
+impl FramedMapper for SavitzkyGolayMapper {
+    type Input = Channeled<VizFloat>;
+    type Output = Channeled<VizFloat>;
+
     fn map<'a>(
         &'a mut self,
         input: &'a mut [Channeled<VizFloat>],
@@ -220,7 +220,7 @@ impl FramedMapper<Channeled<VizFloat>, Channeled<VizFloat>> for SavitzkyGolayMap
                     .iter()
                     .zip(coefficients.iter())
                     .map(move |(v, cf)| v.map(move |v| multiply_rational_float(cf, v)))
-                    .fold1(move |sum, next| {
+                    .reduce(move |sum, next| {
                         sum.zip(next)
                             .expect("mixed mono/stereo?")
                             .map(move |(s, n)| s + n)
@@ -303,8 +303,6 @@ impl Iterator for SlidingWindow {
         (self.size, Some(self.size))
     }
 }
-
-unsafe impl TrustedLen for SlidingWindow {}
 
 impl ExactSizeIterator for SlidingWindow {}
 

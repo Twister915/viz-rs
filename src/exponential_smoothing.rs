@@ -1,7 +1,7 @@
 use crate::channeled::Channeled;
 use crate::framed::FramedMapper;
-use anyhow::Result;
 use crate::util::VizFloat;
+use anyhow::Result;
 
 pub struct ExponentialSmoothing {
     previous: Vec<Vec<Channeled<VizFloat>>>,
@@ -19,12 +19,15 @@ impl ExponentialSmoothing {
     }
 }
 
-impl FramedMapper<Channeled<VizFloat>, Channeled<VizFloat>> for ExponentialSmoothing {
+impl FramedMapper for ExponentialSmoothing {
+    type Input = Channeled<VizFloat>;
+    type Output = Channeled<VizFloat>;
+
     fn map<'a>(
         &'a mut self,
         input: &'a mut [Channeled<VizFloat>],
     ) -> Result<Option<&'a mut [Channeled<VizFloat>]>> {
-        if let Some(prev) = self.previous.get(0) {
+        if let Some(prev) = self.previous.first() {
             let alpha = self.alpha;
             let alpha_inv = 1.0 - alpha;
 

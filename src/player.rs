@@ -1,10 +1,10 @@
 use crate::channeled::Channeled;
 use crate::framed::{Sampled, Samples};
-use crate::wav::WavFile;
 use crate::util::VizFloat;
-use anyhow::Result;
-use sdl2::audio::{AudioCallback, AudioDevice, AudioSpecDesired};
+use crate::wav::WavFile;
+use anyhow::{Result, bail};
 use sdl2::AudioSubsystem;
+use sdl2::audio::{AudioCallback, AudioDevice, AudioSpecDesired};
 use std::ops::{Add, Mul, Sub};
 use std::time::{Duration, Instant};
 
@@ -42,7 +42,7 @@ impl WavPlayer {
 
     pub fn play(&mut self) -> Result<()> {
         match self.state.take() {
-            WavStates::Empty => panic!("empty when can't be empty"),
+            WavStates::Empty => bail!("player state was unexpectedly empty"),
             WavStates::Playing(playing) => {
                 self.state = WavStates::Playing(playing);
             }
@@ -69,15 +69,16 @@ impl WavPlayer {
 
     pub fn stop(&mut self) -> Result<()> {
         match self.state.take() {
-            WavStates::Empty => panic!("empty when can't be empty"),
+            WavStates::Empty => bail!("player state was unexpectedly empty"),
             WavStates::Ready(ready) => {
                 self.state = WavStates::Ready(ready);
             }
             WavStates::Playing(playing) => {
                 playing.pause();
                 let mut inner = playing.close_and_get_callback().inner;
-                inner.at +=
-                    Instant::now().sub(inner.start_playing_at.take().expect("should exist"));
+                if let Some(start_playing_at) = inner.start_playing_at.take() {
+                    inner.at += Instant::now().sub(start_playing_at);
+                }
                 self.state = WavStates::Ready(inner);
             }
         }
@@ -86,6 +87,7 @@ impl WavPlayer {
     }
 
     pub fn seek(&mut self, amount: Duration) -> Result<()> {
+        let was_playing = matches!(self.state, WavStates::Playing(_));
         let seek_to = Instant::now().add(amount);
         self.stop()?;
         if let WavStates::Ready(player) = &mut self.state {
@@ -98,10 +100,13 @@ impl WavPlayer {
             player.at += skip_time;
             player.file_at += skip_time;
         } else {
-            panic!("state malfunction, stopped but not in ready state")
+            bail!("player state was not ready after stop")
         }
 
-        self.play()
+        if was_playing {
+            self.play()?;
+        }
+        Ok(())
     }
 }
 
@@ -121,14 +126,24 @@ impl AudioCallback for WavCallback {
 
     fn callback(&mut self, data: &mut [Self::Channel]) {
         let mut idx = 0;
-        while let Some(sample) = self.inner.source.next_sample().expect("no err") {
+        let mut sample_frames = 0u32;
+        while idx < data.len() {
+            let sample = match self.inner.source.next_sample() {
+                Ok(Some(sample)) => sample,
+                Ok(None) | Err(_) => break,
+            };
+
             match sample {
                 Channeled::Mono(v) => {
                     let v: VizFloat = v.into();
                     let v = v as f32;
                     data[idx] = v;
+                    idx += 1;
                 }
                 Channeled::Stereo(l, r) => {
+                    if idx + 1 >= data.len() {
+                        break;
+                    }
                     let l: VizFloat = l.into();
                     let r: VizFloat = r.into();
                     let l = l as f32;
@@ -136,17 +151,20 @@ impl AudioCallback for WavCallback {
                     data[idx] = l;
                     idx += 1;
                     data[idx] = r;
+                    idx += 1;
                 }
             }
 
-            idx += 1;
-            if idx == data.len() {
-                self.inner.file_at +=
-                    Duration::from_nanos(1_000_000_000 / (self.inner.source.sample_rate as u64))
-                        .mul(idx as u32);
-                return;
-            }
+            sample_frames += 1;
         }
+
+        if sample_frames != 0 {
+            self.inner.file_at +=
+                Duration::from_nanos(1_000_000_000 / (self.inner.source.sample_rate as u64))
+                    .mul(sample_frames);
+        }
+
+        data[idx..].iter_mut().for_each(move |v| *v = 0.0);
     }
 }
 

@@ -1,0 +1,8 @@
+[build]
+rustflags = ["-C", "target-cpu=native"]
+
+# Apple Silicon: Homebrew installs SDL2 under /opt/homebrew/lib, which isn't on
+# the default linker search path. A target-specific `rustflags` replaces (does
+# not merge with) the [build] one above, so target-cpu=native is repeated here.
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "target-cpu=native", "-L", "/opt/homebrew/lib"]

@@ -2,42 +2,37 @@ use crate::channeled::Channeled;
 use crate::util::try_use_iter;
 use anyhow::Result;
 use num_rational::Rational64;
-use std::marker::PhantomData;
 use std::time::Duration;
 
-pub trait Framed<E, I> {
+pub trait Framed {
+    type Item;
 
-    fn into_deep_inner(self) -> I;
-
-    fn apply_mapper<M, R>(self, mapper: M) -> MappedFramed<Self, M, E, R, I>
+    fn apply_mapper<M>(self, mapper: M) -> MappedFramed<Self, M>
     where
         Self: Sized,
-        M: FramedMapper<E, R>,
+        M: FramedMapper<Input = Self::Item>,
     {
         MappedFramed {
             source: self,
             mapper,
-            _src_typ: PhantomData,
-            _dst_typ: PhantomData,
-            _inner_typ: PhantomData,
         }
     }
 
-    fn lift<F, M, R>(self, factory: F) -> MappedFramed<Self, M, E, R, I>
+    fn lift<F, M>(self, factory: F) -> MappedFramed<Self, M>
     where
         Self: Sized,
         F: FnOnce(usize) -> M,
-        M: FramedMapper<E, R>,
+        M: FramedMapper<Input = Self::Item>,
     {
         let size = self.full_frame_size();
         self.apply_mapper(factory(size))
     }
 
-    fn try_lift<F, M, X, R>(self, factory: F) -> Result<MappedFramed<Self, M, E, R, I>, X>
+    fn try_lift<F, M, X>(self, factory: F) -> Result<MappedFramed<Self, M>, X>
     where
         Self: Sized,
         F: FnOnce(usize) -> Result<M, X>,
-        M: FramedMapper<E, R>,
+        M: FramedMapper<Input = Self::Item>,
     {
         let size = self.full_frame_size();
         Ok(self.apply_mapper(factory(size)?))
@@ -53,66 +48,37 @@ pub trait Framed<E, I> {
 
     fn seek_frame(&mut self, n: isize) -> Result<()>;
 
-    fn next_frame(&mut self) -> Result<Option<&mut [E]>>;
-
-    fn num_frames(&self) -> usize;
-
-    fn num_frames_remain(&self) -> usize;
-
-    fn num_full_frames(&self) -> usize;
-
-    fn num_full_frames_remain(&self) -> usize {
-        let total_full_frames = self.num_full_frames();
-        let frames_consumed = self.num_frames() - self.num_frames_remain();
-        if frames_consumed > total_full_frames {
-            0
-        } else {
-            total_full_frames - frames_consumed
-        }
-    }
+    fn next_frame(&mut self) -> Result<Option<&mut [Self::Item]>>;
 
     fn full_frame_size(&self) -> usize;
 
-    fn map<F, R>(self, mapper: F) -> MappedFramed<Self, FramedMapFn<E, R, F>, E, R, I>
+    fn map<F, R>(self, mapper: F) -> MapFramed<Self, F, R>
     where
         Self: Sized,
-        F: Fn(&E) -> R,
+        F: Fn(&Self::Item) -> R,
     {
-        self.lift(move |cap| FramedMapFn {
+        let cap = self.full_frame_size();
+        MapFramed {
+            source: self,
             mapper,
             buf: Vec::with_capacity(cap),
-            _in_typ: PhantomData,
-        })
-    }
-
-    fn map_mut<F>(self, mapper: F) -> MappedFramed<Self, FramedMutMapFn<E, F>, E, E, I>
-    where
-        Self: Sized,
-        F: FnMut(&mut E) -> (),
-    {
-        self.lift(move |_| FramedMutMapFn {
-            mapper,
-            _in_typ: PhantomData,
-        })
-    }
-
-    fn collect(mut self) -> Result<Vec<Vec<E>>>
-    where
-        Self: Sized,
-        E: Copy,
-    {
-        let mut big_out_buf = Vec::with_capacity(self.num_frames_remain());
-        while let Some(frame) = self.next_frame()? {
-            big_out_buf.push(frame.iter().copied().collect::<Vec<_>>());
         }
+    }
 
-        Ok(big_out_buf)
+    fn map_mut<F>(self, mapper: F) -> MapMutFramed<Self, F>
+    where
+        Self: Sized,
+        F: FnMut(&mut Self::Item),
+    {
+        MapMutFramed {
+            source: self,
+            mapper,
+        }
     }
 }
 
-pub trait Samples<T, I>: Sampled {
-
-    fn into_deep_inner(self) -> I;
+pub trait Samples: Sampled {
+    type Item;
 
     fn compose<F, O>(self, f: F) -> O
     where
@@ -124,7 +90,7 @@ pub trait Samples<T, I>: Sampled {
 
     fn seek_samples(&mut self, n: isize) -> Result<()>;
 
-    fn next_sample(&mut self) -> Result<Option<T>>;
+    fn next_sample(&mut self) -> Result<Option<Self::Item>>;
 
     fn num_samples_remain(&self) -> usize;
 
@@ -132,10 +98,10 @@ pub trait Samples<T, I>: Sampled {
         self.num_samples_remain() != 0
     }
 
-    fn map<F, R>(self, mapper: F) -> MappedSamples<Self, F, T, R, I>
+    fn map<F, R>(self, mapper: F) -> MappedSamples<Self, F>
     where
         Self: Sized,
-        F: Fn(T) -> R,
+        F: Fn(Self::Item) -> R,
     {
         MappedSamples::new(self, mapper)
     }
@@ -149,112 +115,115 @@ pub trait Sampled {
     }
 
     fn sample_rate(&self) -> usize;
-
-    fn num_samples(&self) -> usize;
-
-    fn duration(&self) -> Duration {
-        let samples_per_ms = self.sample_rate() as f64;
-        let num_samples = self.num_samples() as f64;
-        let num_sec = num_samples / samples_per_ms;
-        let num_nano = num_sec * 1_000_000_000.0;
-        let num_nano = num_nano.floor() as u64;
-        Duration::from_nanos(num_nano)
-    }
-}
-
-pub trait AudioSource: Sampled {
-    fn num_channels(&self) -> usize;
 }
 
 #[macro_export]
 macro_rules! delegate_impls {
     ($ty:ident <$($g: ident),+>, $s: ident, $fld: ident) => {
-        impl<$($g),+> crate::framed::AudioSource for $ty<$($g),+> where $s: crate::framed::AudioSource {
-            fn num_channels(&self) -> usize {
-                self.$fld.num_channels()
-            }
-        }
-
-        impl<$($g),+> crate::framed::Sampled for $ty<$($g),+> where $s: crate::framed::Sampled {
+        impl<$($g),+> $crate::framed::Sampled for $ty<$($g),+> where $s: $crate::framed::Sampled {
             fn sample_rate(&self) -> usize {
                 self.$fld.sample_rate()
-            }
-
-            fn num_samples(&self) -> usize {
-                self.$fld.num_samples()
-            }
-
-            fn duration(&self) -> std::time::Duration {
-                self.$fld.duration()
             }
         }
     }
 }
 
-pub trait FramedMapper<T, R> {
-    fn map<'a>(&'a mut self, input: &'a mut [T]) -> Result<Option<&'a mut [R]>>;
+pub trait FramedMapper {
+    type Input;
+    type Output;
+
+    fn map<'a>(
+        &'a mut self,
+        input: &'a mut [Self::Input],
+    ) -> Result<Option<&'a mut [Self::Output]>>;
 
     fn map_frame_size(&self, orig: usize) -> usize {
         orig
     }
 }
 
-pub struct FramedMutMapFn<T, F> {
-    mapper: F,
-    _in_typ: PhantomData<T>,
-}
-
-impl<T, F> FramedMapper<T, T> for FramedMutMapFn<T, F>
-where
-    F: FnMut(&mut T) -> (),
-{
-    fn map<'a>(&'a mut self, input: &'a mut [T]) -> Result<Option<&'a mut [T]>> {
-        input.iter_mut().for_each(&mut self.mapper);
-        Ok(Some(input))
-    }
-}
-
-pub struct FramedMapFn<T, R, F> {
-    mapper: F,
-    buf: Vec<R>,
-    _in_typ: PhantomData<T>,
-}
-
-impl<T, R, F> FramedMapper<T, R> for FramedMapFn<T, R, F>
-where
-    F: Fn(&T) -> R,
-{
-    fn map<'a>(&'a mut self, input: &'a mut [T]) -> Result<Option<&'a mut [R]>> {
-        self.buf.clear();
-        let mapper = &self.mapper;
-        self.buf.extend(input.iter().map(mapper));
-        Ok(Some(self.buf.as_mut_slice()))
-    }
-}
-
-pub struct MappedFramed<S, M, T, R, I> {
+pub struct MapMutFramed<S, F> {
     source: S,
-    mapper: M,
-    _src_typ: PhantomData<T>,
-    _dst_typ: PhantomData<R>,
-    _inner_typ: PhantomData<I>,
+    mapper: F,
 }
 
-impl<S, M, T, R, I> Framed<R, I> for MappedFramed<S, M, T, R, I>
+impl<S, F> Framed for MapMutFramed<S, F>
 where
-    S: Framed<T, I>,
-    M: FramedMapper<T, R>,
+    S: Framed,
+    F: FnMut(&mut S::Item),
 {
-    fn into_deep_inner(self) -> I {
-        self.source.into_deep_inner()
-    }
-
+    type Item = S::Item;
 
     fn seek_frame(&mut self, n: isize) -> Result<()> {
         self.source.seek_frame(n)
     }
 
-    fn next_frame(&mut self) -> Result<Option<&mut [R]>> {
+    fn next_frame(&mut self) -> Result<Option<&mut [Self::Item]>> {
+        let Some(input) = self.source.next_frame()? else {
+            return Ok(None);
+        };
+        input.iter_mut().for_each(&mut self.mapper);
+        Ok(Some(input))
+    }
+
+    fn full_frame_size(&self) -> usize {
+        self.source.full_frame_size()
+    }
+}
+
+delegate_impls!(MapMutFramed<S, F>, S, source);
+
+pub struct MapFramed<S, F, R> {
+    source: S,
+    mapper: F,
+    buf: Vec<R>,
+}
+
+impl<S, F, R> Framed for MapFramed<S, F, R>
+where
+    S: Framed,
+    F: Fn(&S::Item) -> R,
+{
+    type Item = R;
+
+    fn seek_frame(&mut self, n: isize) -> Result<()> {
+        self.source.seek_frame(n)
+    }
+
+    fn next_frame(&mut self) -> Result<Option<&mut [Self::Item]>> {
+        let Some(input) = self.source.next_frame()? else {
+            return Ok(None);
+        };
+        self.buf.clear();
+        let mapper = &self.mapper;
+        self.buf.extend(input.iter().map(mapper));
+        Ok(Some(self.buf.as_mut_slice()))
+    }
+
+    fn full_frame_size(&self) -> usize {
+        self.source.full_frame_size()
+    }
+}
+
+delegate_impls!(MapFramed<S, F, R>, S, source);
+
+pub struct MappedFramed<S, M> {
+    source: S,
+    mapper: M,
+}
+
+impl<S, M> Framed for MappedFramed<S, M>
+where
+    S: Framed<Item = M::Input>,
+    M: FramedMapper,
+{
+    type Item = M::Output;
+
+    fn seek_frame(&mut self, n: isize) -> Result<()> {
+        self.source.seek_frame(n)
+    }
+
+    fn next_frame(&mut self) -> Result<Option<&mut [Self::Item]>> {
         if let Some(data) = self.source.next_frame()? {
             self.mapper.map(data)
         } else {
@@ -262,66 +231,38 @@ where
         }
     }
 
-    fn num_frames(&self) -> usize {
-        self.source.num_frames()
-    }
-
-    fn num_frames_remain(&self) -> usize {
-        self.source.num_frames_remain()
-    }
-
-    fn num_full_frames(&self) -> usize {
-        self.source.num_full_frames()
-    }
-
     fn full_frame_size(&self) -> usize {
         self.mapper.map_frame_size(self.source.full_frame_size())
     }
 }
 
-delegate_impls!(MappedFramed<S, M, T, R, I>, S, source);
+delegate_impls!(MappedFramed<S, M>, S, source);
 
-pub struct MappedSamples<S, M, T, R, I> {
+pub struct MappedSamples<S, M> {
     source: S,
     mapper: M,
-
-    _src_typ: PhantomData<T>,
-    _dst_typ: PhantomData<R>,
-    _inner_typ: PhantomData<I>,
 }
 
-impl<S, M, T, R, I> MappedSamples<S, M, T, R, I>
-where
-    S: Samples<T, I> + Sampled,
-    M: Fn(T) -> R,
-{
+impl<S, M> MappedSamples<S, M> {
     pub fn new(source: S, mapper: M) -> Self {
-        Self {
-            source,
-            mapper,
-            _src_typ: PhantomData,
-            _dst_typ: PhantomData,
-            _inner_typ: PhantomData,
-        }
+        Self { source, mapper }
     }
 }
 
-delegate_impls!(MappedSamples<S, M, T, R, I>, S, source);
+delegate_impls!(MappedSamples<S, M>, S, source);
 
-impl<S, M, T, R, I> Samples<R, I> for MappedSamples<S, M, T, R, I>
+impl<S, M, R> Samples for MappedSamples<S, M>
 where
-    S: Samples<T, I> + Sampled,
-    M: Fn(T) -> R,
+    S: Samples + Sampled,
+    M: Fn(S::Item) -> R,
 {
-    fn into_deep_inner(self) -> I {
-        return self.source.into_deep_inner()
-    }
+    type Item = R;
 
     fn seek_samples(&mut self, n: isize) -> Result<()> {
         self.source.seek_samples(n)
     }
 
-    fn next_sample(&mut self) -> Result<Option<R>> {
+    fn next_sample(&mut self) -> Result<Option<Self::Item>> {
         Ok(if let Some(next) = self.source.next_sample()? {
             let mapper = &self.mapper;
             Some(mapper(next))
@@ -341,12 +282,15 @@ pub struct ChanneledMapperWrapper<M, T, R> {
     out_buf: Vec<R>,
 }
 
-impl<T, R, M> FramedMapper<T, R> for ChanneledMapperWrapper<M, T, R>
+impl<T, R, M> FramedMapper for ChanneledMapperWrapper<M, T, R>
 where
-    M: FramedMapper<Channeled<T>, Channeled<R>>,
+    M: FramedMapper<Input = Channeled<T>, Output = Channeled<R>>,
     T: Copy,
     R: Copy,
 {
+    type Input = T;
+    type Output = R;
+
     fn map<'a>(&'a mut self, input: &'a mut [T]) -> Result<Option<&'a mut [R]>> {
         self.in_buf.clear();
         self.in_buf
@@ -375,7 +319,7 @@ where
 }
 
 pub trait SplitChanneledFramedMapper<T, R>:
-    FramedMapper<Channeled<T>, Channeled<R>> + Sized
+    FramedMapper<Input = Channeled<T>, Output = Channeled<R>> + Sized
 {
     fn split_channeled(self, cap: usize) -> ChanneledMapperWrapper<Self, T, R> {
         let cap_mapped = self.map_frame_size(cap);
@@ -388,6 +332,6 @@ pub trait SplitChanneledFramedMapper<T, R>:
 }
 
 impl<T, R, M> SplitChanneledFramedMapper<T, R> for M where
-    M: FramedMapper<Channeled<T>, Channeled<R>> + Sized
+    M: FramedMapper<Input = Channeled<T>, Output = Channeled<R>> + Sized
 {
 }

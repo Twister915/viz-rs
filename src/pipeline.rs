@@ -2,24 +2,26 @@ use crate::binner::{BinConfig, Binner};
 use crate::channeled::Channeled;
 use crate::exponential_smoothing::ExponentialSmoothing;
 use crate::fft::FramedFft;
-use crate::framed::{Framed, Sampled, Samples};
+use crate::framed::{Framed, Sampled, Samples, SplitChanneledFramedMapper};
 use crate::savitzky_golay::SavitzkyGolayConfig;
 use crate::sliding::SlidingFrame;
 use crate::timer::FramedTimed;
+use crate::util::VizFloat;
 use crate::window::{BlackmanNuttall, WindowingFunction};
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use num_rational::Rational64;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer, de::Error as DeError};
 use std::fs::File;
 use std::include_str;
 use std::io::ErrorKind;
 use std::time::Duration;
-use crate::util::VizFloat;
 
 #[derive(Debug, Clone, Copy, Deserialize)]
 pub struct VizPipelineConfig {
     pub fps: u64,
     pub data_window_ms: u64,
+    #[serde(default = "default_bar_color")]
+    pub bar_color: VizColor,
     pub alpha0: VizFloat,
     pub alpha1: VizFloat,
     pub smoothing0: SavitzkyGolayConfig,
@@ -38,6 +40,65 @@ pub struct VizBinningConfig {
     pub discrete_levels: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VizColor {
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
+}
+
+impl VizColor {
+    pub const fn rgb(r: u8, g: u8, b: u8) -> Self {
+        Self { r, g, b }
+    }
+}
+
+impl<'de> Deserialize<'de> for VizColor {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        parse_hex_color(&value).map_err(D::Error::custom)
+    }
+}
+
+fn default_bar_color() -> VizColor {
+    VizColor::rgb(0, 255, 0)
+}
+
+fn parse_hex_color(value: &str) -> Result<VizColor, String> {
+    let hex = value.strip_prefix('#').unwrap_or(value);
+    let bytes = hex.as_bytes();
+    if bytes.len() != 6 {
+        return Err(format!(
+            "bar_color must be a 6-digit hex color like #00ff00, got {value:?}"
+        ));
+    }
+
+    let r = parse_hex_byte(bytes[0], bytes[1], value)?;
+    let g = parse_hex_byte(bytes[2], bytes[3], value)?;
+    let b = parse_hex_byte(bytes[4], bytes[5], value)?;
+    Ok(VizColor::rgb(r, g, b))
+}
+
+fn parse_hex_byte(hi: u8, lo: u8, original: &str) -> Result<u8, String> {
+    let hi = parse_hex_digit(hi, original)?;
+    let lo = parse_hex_digit(lo, original)?;
+    Ok((hi << 4) | lo)
+}
+
+fn parse_hex_digit(byte: u8, original: &str) -> Result<u8, String> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        b'A'..=b'F' => Ok(byte - b'A' + 10),
+        _ => Err(format!(
+            "bar_color must contain only hex digits, got {original:?}"
+        )),
+    }
+}
+
 impl VizPipelineConfig {
     pub fn data_window(&self) -> Duration {
         Duration::from_millis(self.data_window_ms)
@@ -46,9 +107,61 @@ impl VizPipelineConfig {
 
 const SEEK_BACK_LIMIT: usize = 1;
 
-pub fn create_viz_pipeline<E, I, S>(source: S, config: VizPipelineConfig) -> Result<impl Framed<VizFloat, I>>
+pub fn create_viz_pipeline<E, S>(
+    source: S,
+    config: VizPipelineConfig,
+) -> Result<impl Framed<Item = VizFloat>>
 where
-    S: Samples<Channeled<E>, I>,
+    S: Samples<Item = Channeled<E>>,
+    E: Into<VizFloat>,
+{
+    Ok(create_binned_fft_pipeline(source, config)?
+        // dBFS-ish conversion and clamp between min/max dB -> (0, 1)
+        .map_mut(move |v| normalize_amplitude_db(v, config.min_db, config.max_db))
+        // nearby bars smoothing Savitzky Golay, now in display space
+        .lift(move |size| config.smoothing0.into_mapper(size).split_channeled(size))
+        // keep smooth data inside (0, 1)
+        .map_mut(constrain_normalized)
+        // time smoothing
+        .lift(move |size| {
+            ExponentialSmoothing::new(SEEK_BACK_LIMIT, config.alpha0).split_channeled(size)
+        })
+        // one more gentle spatial smoothing pass after the first temporal pass
+        .lift(move |size| config.smoothing1.into_mapper(size).split_channeled(size))
+        // keep smooth data inside (0, 1)
+        .map_mut(constrain_normalized)
+        // time smoothing again
+        .lift(move |size| {
+            ExponentialSmoothing::new(SEEK_BACK_LIMIT, config.alpha1).split_channeled(size)
+        })
+        // 48 distinct "levels" each bar can take on
+        .map_mut(discrete_levels(config.binning.discrete_levels))
+        // time the frames and log it
+        .compose(move |frames| FramedTimed::new(frames, 1024)))
+}
+
+pub fn create_debug_fft_pipeline<E, S>(
+    source: S,
+    config: VizPipelineConfig,
+) -> Result<impl Framed<Item = VizFloat>>
+where
+    S: Samples<Item = Channeled<E>>,
+    E: Into<VizFloat>,
+{
+    Ok(create_binned_fft_pipeline(source, config)?
+        // Smooth raw binned FFT amplitudes without applying the display dB scale.
+        .lift(move |size| config.smoothing0.into_mapper(size).split_channeled(size))
+        .lift(move |size| {
+            ExponentialSmoothing::new(SEEK_BACK_LIMIT, config.alpha0).split_channeled(size)
+        }))
+}
+
+fn create_binned_fft_pipeline<E, S>(
+    source: S,
+    config: VizPipelineConfig,
+) -> Result<impl Framed<Item = VizFloat>>
+where
+    S: Samples<Item = Channeled<E>>,
     E: Into<VizFloat>,
 {
     Ok(source
@@ -68,13 +181,9 @@ where
             SlidingFrame::new(wav, frame_size, frame_stride)
         })
         // blackman nuttall window
-        .lift(move |size| BlackmanNuttall::mapper(size))
+        .lift(BlackmanNuttall::mapper)
         // FFT
-        .try_lift(move |size| FramedFft::new(size))?
-        // time smoothing
-        .lift(move |_| ExponentialSmoothing::new(SEEK_BACK_LIMIT, config.alpha0))
-        // nearby bars smoothing Savitzky Golay
-        .lift(move |size| config.smoothing0.into_mapper(size))
+        .try_lift(FramedFft::new)?
         // bin the FFT output into a smaller number of bars
         .compose(move |source| {
             let config = BinConfig {
@@ -87,30 +196,20 @@ where
             };
             source.apply_mapper(Binner::new(config))
         })
-        // dB conversion
-        .map_mut(channeled_map_mut(to_db))
-        // clamp between min/max dB -> (0, 1)
-        .map_mut(channeled_map_mut(move |v| {
-            normalize_between(v, config.min_db, config.max_db)
-        }))
-        // normalize infinities and NaNs
-        .map_mut(channeled_map_mut(normalize_infs))
-        // more savitzky golay smoothing after binning
-        .lift(move |size| config.smoothing1.into_mapper(size))
-        // keep smooth data inside (0, 1)
-        .map_mut(channeled_map_mut(constrain_normalized))
-        // time smoothing again
-        .lift(move |_| ExponentialSmoothing::new(SEEK_BACK_LIMIT, config.alpha1))
-        // Channeled data to single value per bar
-        .map(flatten_channels)
-        // 48 distinct "levels" each bar can take on
-        .map_mut(discrete_levels(config.binning.discrete_levels))
-        // time the frames and log it
-        .compose(move |frames| FramedTimed::new(frames, 1024)))
+        // Channeled data to a single RMS amplitude per bar
+        .map(flatten_channels))
 }
 
-fn to_db(v: &mut VizFloat) {
-    *v = 20.0 * v.log10();
+fn normalize_amplitude_db(v: &mut VizFloat, min: VizFloat, max: VizFloat) {
+    let floor = VizFloat::powf(10.0, min / 20.0);
+    let amp = if v.is_finite() && *v > floor {
+        *v
+    } else {
+        floor
+    };
+    let mut db = 20.0 * amp.log10();
+    normalize_between(&mut db, min, max);
+    *v = db;
 }
 
 fn normalize_between(v: &mut VizFloat, min: VizFloat, max: VizFloat) {
@@ -124,28 +223,18 @@ fn normalize_between(v: &mut VizFloat, min: VizFloat, max: VizFloat) {
     }
 }
 
-fn normalize_infs(v: &mut VizFloat) {
-    let vv = *v;
-    if v.is_nan() || vv == VizFloat::NEG_INFINITY {
-        *v = 0.0;
-    } else if vv == VizFloat::INFINITY {
-        *v = 1.0;
-    }
-}
-
 fn constrain_normalized(v: &mut VizFloat) {
-    let vv = *v;
-    if vv > 1.0 {
-        *v = 1.0;
-    } else if vv < 0.0 {
+    if v.is_nan() {
         *v = 0.0;
+    } else {
+        *v = v.clamp(0.0, 1.0);
     }
 }
 
 fn flatten_channels(input: &Channeled<VizFloat>) -> VizFloat {
     use Channeled::*;
     match *input {
-        Stereo(a, b) => (a + b) / (2.0 as VizFloat),
+        Stereo(a, b) => (((a * a) + (b * b)) / 2.0).sqrt(),
         Mono(v) => v,
     }
 }
@@ -153,15 +242,6 @@ fn flatten_channels(input: &Channeled<VizFloat>) -> VizFloat {
 fn discrete_levels(levels: u32) -> impl FnMut(&mut VizFloat) {
     let levels = levels as VizFloat;
     move |v| *v = (*v * levels).floor() / levels
-}
-
-fn channeled_map_mut<F, T>(mut f: F) -> impl FnMut(&mut Channeled<T>)
-where
-    F: FnMut(&mut T),
-{
-    move |input| {
-        input.as_mut_ref().for_each(&mut f);
-    }
 }
 
 pub fn open_config_or_default() -> Result<VizPipelineConfig> {
@@ -205,7 +285,7 @@ pub fn open_config_file(file: &str) -> Result<Option<VizPipelineConfig>> {
                 return match err.kind() {
                     ErrorKind::NotFound => Ok(None),
                     other => Err(anyhow!("error opening file {} :: {:?}", file, other)),
-                }
+                };
             }
         },
     )?)?))
@@ -323,4 +403,28 @@ fn default_config() -> VizPipelineConfig {
     let out = serde_yaml::from_str(include_str!("default-config.yml")).expect("should be valid");
     eprintln!("[config] using default config...");
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_bar_color_hex_codes() {
+        assert_eq!(
+            parse_hex_color("#1a2B3c").unwrap(),
+            VizColor::rgb(0x1a, 0x2b, 0x3c)
+        );
+        assert_eq!(
+            parse_hex_color("ff0044").unwrap(),
+            VizColor::rgb(0xff, 0x00, 0x44)
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_bar_color_hex_codes() {
+        assert!(parse_hex_color("#123").is_err());
+        assert!(parse_hex_color("#12345g").is_err());
+        assert!(parse_hex_color("#a\u{e9}\u{e9}b").is_err());
+    }
 }

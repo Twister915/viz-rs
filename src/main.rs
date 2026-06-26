@@ -1,14 +1,3 @@
-#![feature(div_duration)]
-#![feature(trusted_len)]
-#![feature(associated_type_defaults)]
-
-#[cfg(not(target_env = "msvc"))]
-use jemallocator::Jemalloc;
-
-#[cfg(not(target_env = "msvc"))]
-#[global_allocator]
-static GLOBAL: Jemalloc = Jemalloc;
-
 use crate::viz::visualize;
 
 mod binner;
@@ -26,13 +15,12 @@ mod viz;
 mod wav;
 mod window;
 
-fn main() {
+fn main() -> anyhow::Result<()> {
     if let Some(target) = std::env::args().nth(1) {
-        match visualize(target.as_str()) {
-            Ok(()) => {}
-            Err(err) => panic!("got error: {:?}", err),
-        }
+        visualize(target.as_str())?;
     } else {
         eprintln!("err: specify target file as first arg!")
     }
+
+    Ok(())
 }

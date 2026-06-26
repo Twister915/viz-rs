@@ -19,4 +19,8 @@ if [[ -z "${2}" ]]; then
   fail "please specify the name to save the file as";
 fi;
 
-youtube-dl -o "${2}.%(ext)s" --audio-format wav -x "${1}"
+if ! command -v yt-dlp >/dev/null 2>&1; then
+  fail "yt-dlp is not installed (try: brew install yt-dlp)";
+fi;
+
+yt-dlp -o "${2}.%(ext)s" --audio-format wav -x "${1}"
