@@ -30,6 +30,10 @@ pub struct VizPipelineConfig {
     pub debug_fft_overlay_color: VizColor,
     #[serde(default)]
     pub high_water_line: VizHighWaterLineConfig,
+    /// Seconds for the bars to halve in height when playback is paused, unloaded,
+    /// or finished. Drives the natural "party stopped" fall to the baseline.
+    #[serde(default = "default_pause_decay_secs")]
+    pub pause_decay_secs: VizFloat,
     pub alpha0: VizFloat,
     pub alpha1: VizFloat,
     pub smoothing0: SavitzkyGolayConfig,
@@ -137,6 +141,10 @@ fn default_high_water_line_fall_acceleration() -> VizFloat {
     2.0
 }
 
+fn default_pause_decay_secs() -> VizFloat {
+    0.4
+}
+
 fn default_tilt_reference_hz() -> VizFloat {
     1000.0
 }
@@ -145,7 +153,7 @@ fn default_max_compensation_adjustment_db() -> VizFloat {
     18.0
 }
 
-fn parse_hex_color(value: &str) -> Result<VizColor, String> {
+pub fn parse_hex_color(value: &str) -> Result<VizColor, String> {
     let hex = value.strip_prefix('#').unwrap_or(value);
     let bytes = hex.as_bytes();
     if bytes.len() != 6 {
@@ -448,9 +456,16 @@ pub fn open_config_file(file: &str) -> Result<Option<VizPipelineConfig>> {
     )?)?))
 }
 
-fn validate_config(cfg: VizPipelineConfig) -> Result<VizPipelineConfig> {
+pub fn validate_config(cfg: VizPipelineConfig) -> Result<VizPipelineConfig> {
     if cfg.fps <= 1 {
         return Err(anyhow!("fps must be > 1, got {}", cfg.fps));
+    }
+
+    if !cfg.pause_decay_secs.is_finite() || cfg.pause_decay_secs <= 0.0 {
+        return Err(anyhow!(
+            "pause_decay_secs must be finite and > 0, got {}",
+            cfg.pause_decay_secs
+        ));
     }
 
     if cfg.data_window_ms <= 1 {
@@ -604,9 +619,15 @@ fn validate_smoothing_config(cfg: &SavitzkyGolayConfig) -> Result<()> {
 }
 
 fn default_config() -> VizPipelineConfig {
-    let out = serde_yaml::from_str(include_str!("default-config.yml")).expect("should be valid");
+    let out = embedded_default_config();
     eprintln!("[config] using default config...");
     out
+}
+
+/// The compiled-in fallback config, without the logging side effect. Used to start
+/// the visualizer with no song loaded so a song can be loaded from the command palette.
+pub fn embedded_default_config() -> VizPipelineConfig {
+    serde_yaml::from_str(include_str!("default-config.yml")).expect("should be valid")
 }
 
 #[cfg(test)]

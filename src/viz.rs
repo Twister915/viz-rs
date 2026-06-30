@@ -1,21 +1,42 @@
 use crate::channeled::Channeled;
-use crate::framed::Framed;
-use crate::pipeline::{
-    VizColor, VizPipelineConfig, create_debug_fft_pipeline, create_viz_pipeline,
-    open_config_or_default,
-};
+use crate::command::{Command, MAX_VISIBLE_SUGGESTIONS, Palette, ParamDesc, Theme};
+use crate::engine::VizEngine;
+use crate::font;
+use crate::pipeline::{VizColor, VizPipelineConfig, open_config_or_default, validate_config};
 use crate::player::WavPlayer;
-use crate::util::{VizFloat, log_timed};
+use crate::util::VizFloat;
 use crate::wav::WavFile;
 use anyhow::Result;
-use sdl2::event::{Event, WindowEvent};
+use sdl2::AudioSubsystem;
+use sdl2::event::Event;
 use sdl2::keyboard::Keycode;
 use sdl2::pixels::Color;
 use sdl2::rect::{Point, Rect};
-use sdl2::render::WindowCanvas;
+use sdl2::render::{BlendMode, WindowCanvas};
 use sdl2::video::FullscreenType;
 use std::ops::{Add, Sub};
 use std::time::{Duration, Instant};
+
+const BUF_SIZE: usize = 32768;
+
+// --- Overlay (debug UI / palette) styling --------------------------------------------------
+const MARGIN: i32 = 12;
+const TEXT_BRIGHT: VizColor = VizColor::rgb(236, 238, 248);
+const TEXT_DIM: VizColor = VizColor::rgb(150, 154, 176);
+const TEXT_ACCENT: VizColor = VizColor::rgb(120, 200, 255);
+const TEXT_ERR: VizColor = VizColor::rgb(255, 120, 128);
+const TEXT_OK: VizColor = VizColor::rgb(150, 230, 170);
+const TOAST_DURATION: Duration = Duration::from_millis(2800);
+
+fn panel_bg() -> Color {
+    Color::RGBA(10, 10, 16, 210)
+}
+fn panel_bg_strong() -> Color {
+    Color::RGBA(6, 6, 12, 234)
+}
+fn highlight_bg() -> Color {
+    Color::RGBA(80, 120, 200, 70)
+}
 
 #[derive(Clone, Copy)]
 struct BarColors {
@@ -29,6 +50,20 @@ struct RenderStyle {
     bars: BarColors,
     debug_fft_overlay_color: VizColor,
     high_water_color: VizColor,
+}
+
+impl RenderStyle {
+    fn from_config(cfg: &VizPipelineConfig) -> Self {
+        RenderStyle {
+            background_color: cfg.background_color,
+            bars: BarColors {
+                shared: cfg.bar_color,
+                difference: cfg.bar_difference_color,
+            },
+            debug_fft_overlay_color: cfg.debug_fft_overlay_color,
+            high_water_color: cfg.high_water_line.color,
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -113,9 +148,28 @@ impl HighWaterLine {
     }
 }
 
-pub fn visualize(file: &str) -> Result<()> {
+/// What the bars are doing right now, for the debug panel label.
+fn play_state(engine: &VizEngine, paused: bool) -> &'static str {
+    if !engine.is_loaded() {
+        "IDLE"
+    } else if engine.is_ended() {
+        "ENDED"
+    } else if paused {
+        "PAUSED"
+    } else {
+        "PLAYING"
+    }
+}
+
+/// True only while the bars should track live audio (loaded, not paused, not finished).
+fn is_playing(engine: &VizEngine, paused: bool) -> bool {
+    engine.is_loaded() && !paused && !engine.is_ended()
+}
+
+pub fn visualize(file: Option<&str>) -> Result<()> {
     let sdl_context = sdl2::init().map_err(map_sdl_err)?;
     let video_subsystem = sdl_context.video().map_err(map_sdl_err)?;
+    let audio = sdl_context.audio().map_err(map_sdl_err)?;
     let (window_width, window_height) = initial_window_size(&video_subsystem);
     let window = video_subsystem
         .window("vis-rs", window_width, window_height)
@@ -124,226 +178,701 @@ pub fn visualize(file: &str) -> Result<()> {
         .build()?;
 
     let mut canvas = window.into_canvas().accelerated().build()?;
+    canvas.set_blend_mode(BlendMode::Blend);
 
-    let (mut frames, mut debug_frames, config, wav_src) = log_timed(
-        format!("setup visualizer math pipeline for {}", file),
-        || create_data_src(file),
-    )?;
-    let mut wav_player = WavPlayer::new(sdl_context.audio().map_err(map_sdl_err)?, wav_src);
+    let config = open_config_or_default()?;
+    let mut engine = match file {
+        Some(f) => VizEngine::with_song(config, f)?,
+        None => VizEngine::empty(config),
+    };
+    let mut player: Option<WavPlayer> = match file {
+        Some(f) => {
+            let mut p = WavPlayer::new(audio.clone(), WavFile::open(f, BUF_SIZE)?);
+            p.play()?;
+            Some(p)
+        }
+        None => None,
+    };
 
     let mut event_pump = sdl_context.event_pump().map_err(map_sdl_err)?;
     let mouse_util = sdl_context.mouse();
+    let text_input = video_subsystem.text_input();
+    text_input.stop();
 
-    wav_player.play()?;
     let mut paused = false;
     let mut debug_fft_overlay = false;
+    let mut debug_ui = true;
+    let mut palette = Palette::default();
+    let mut toast: Option<(String, Instant)> = None;
     let mut last_frame_for_ts: Option<Instant> = None;
-    let frame_delta = Duration::new(0, (1_000_000_000u64 / config.fps) as u32);
-    let frame_for_offset = config.data_window() / 2;
-    let render_style = RenderStyle {
-        background_color: config.background_color,
-        bars: BarColors {
-            shared: config.bar_color,
-            difference: config.bar_difference_color,
-        },
-        debug_fft_overlay_color: config.debug_fft_overlay_color,
-        high_water_color: config.high_water_line.color,
-    };
-    clear_canvas(&mut canvas, render_style.background_color);
-    let high_water_fall_acceleration = config.high_water_line.fall_acceleration;
     let mut high_water_lines = HighWaterLines::default();
-    let mut last_frame = Vec::new();
-    let mut last_debug_frame = Vec::new();
-    let mut redraw_cached_frame = false;
+    let started_at = Instant::now();
+
+    clear_canvas(&mut canvas, engine.config.background_color);
+
     loop {
         let now = Instant::now();
+        let frame_delta = Duration::new(0, (1_000_000_000u64 / engine.config.fps.max(2)) as u32);
+        let frame_for_offset = engine.config.data_window() / 2;
+        let fall_acceleration = engine.config.high_water_line.fall_acceleration;
+        let pause_decay = engine.config.pause_decay_secs;
 
+        let mut quit = false;
+        let mut suppress_slash = false;
         for event in event_pump.poll_iter() {
             match event {
-                Event::Quit { .. }
-                | Event::KeyDown {
-                    keycode: Some(Keycode::Escape),
-                    ..
-                } => {
-                    set_window_mouse_capture(&mut canvas, &mouse_util, false);
-                    return Ok(());
-                }
-                Event::KeyDown {
-                    keycode: Some(Keycode::Right),
-                    ..
-                } => {
-                    let mut amount_seek = Duration::from_secs(10);
-                    let frames_seek = amount_seek.div_duration_f64(frame_delta).floor() as u32;
-                    amount_seek = frame_delta * frames_seek;
-
-                    wav_player.seek(amount_seek)?;
-                    frames.seek_frame(frames_seek as isize)?;
-                    debug_frames.seek_frame(frames_seek as isize)?;
-                    high_water_lines.reset();
-                    last_frame_for_ts = Some(now.sub(frame_delta));
-                }
-                Event::KeyDown {
-                    keycode: Some(Keycode::D | Keycode::R),
-                    repeat: false,
-                    ..
-                } => {
-                    debug_fft_overlay = !debug_fft_overlay;
-                    redraw_cached_frame = true;
-                    println!(
-                        "debug FFT overlay {}",
-                        if debug_fft_overlay { "on" } else { "off" }
-                    );
-                }
-                Event::KeyDown {
-                    keycode: Some(Keycode::Space),
-                    ..
-                } => {
-                    if paused {
-                        wav_player.play()?;
-                        last_frame_for_ts = Some(Instant::now().sub(frame_delta));
+                Event::Quit { .. } => quit = true,
+                Event::TextInput { text, .. } if palette.open => {
+                    if suppress_slash && text == "/" {
+                        suppress_slash = false;
                     } else {
-                        wav_player.stop()?;
+                        palette.insert(&text);
                     }
-
-                    paused = !paused;
                 }
                 Event::KeyDown {
-                    keycode: Some(Keycode::F),
-                    repeat: false,
+                    keycode: Some(key),
+                    repeat,
                     ..
                 } => {
-                    toggle_desktop_fullscreen(&mut canvas, &mouse_util)?;
-                    redraw_cached_frame = true;
-                }
-                Event::Window {
-                    win_event:
-                        WindowEvent::Exposed
-                        | WindowEvent::Resized(_, _)
-                        | WindowEvent::SizeChanged(_, _)
-                        | WindowEvent::Maximized
-                        | WindowEvent::Restored,
-                    ..
-                } => {
-                    redraw_cached_frame = true;
+                    if palette.open {
+                        match key {
+                            Keycode::Escape => {
+                                palette.close();
+                                text_input.stop();
+                            }
+                            Keycode::Return | Keycode::Return2 | Keycode::KpEnter => {
+                                match palette.parse() {
+                                    Ok(cmd) => {
+                                        match apply_command(
+                                            cmd,
+                                            &mut engine,
+                                            &mut player,
+                                            &audio,
+                                            &mut paused,
+                                            &mut high_water_lines,
+                                            &mut last_frame_for_ts,
+                                        ) {
+                                            Ok(outcome) => {
+                                                if outcome.quit {
+                                                    quit = true;
+                                                }
+                                                toast = Some((outcome.message, Instant::now()));
+                                                palette.status = None;
+                                                palette.close();
+                                                text_input.stop();
+                                            }
+                                            Err(message) => palette.status = Some(message),
+                                        }
+                                    }
+                                    Err(message) => palette.status = Some(message),
+                                }
+                            }
+                            Keycode::Backspace => palette.backspace(),
+                            Keycode::Tab => palette.accept(&engine.config),
+                            Keycode::Up => {
+                                let n = palette.suggestions(&engine.config).len();
+                                palette.move_selection(-1, n);
+                            }
+                            Keycode::Down => {
+                                let n = palette.suggestions(&engine.config).len();
+                                palette.move_selection(1, n);
+                            }
+                            _ => {}
+                        }
+                    } else {
+                        match key {
+                            Keycode::Escape => quit = true,
+                            Keycode::Slash => {
+                                palette.open();
+                                text_input.start();
+                                suppress_slash = true;
+                            }
+                            Keycode::Tab => debug_ui = !debug_ui,
+                            Keycode::Right => {
+                                do_seek(&mut engine, &mut player, 10.0)?;
+                                high_water_lines.reset();
+                                last_frame_for_ts = Some(now.sub(frame_delta));
+                            }
+                            Keycode::Left => {
+                                do_seek(&mut engine, &mut player, -10.0)?;
+                                high_water_lines.reset();
+                                last_frame_for_ts = Some(now.sub(frame_delta));
+                            }
+                            Keycode::D | Keycode::R if !repeat => {
+                                debug_fft_overlay = !debug_fft_overlay;
+                            }
+                            Keycode::Space => {
+                                if engine.is_loaded() && !engine.is_ended() {
+                                    if paused {
+                                        if let Some(p) = &mut player {
+                                            p.play()?;
+                                        }
+                                        last_frame_for_ts = Some(Instant::now().sub(frame_delta));
+                                        paused = false;
+                                    } else {
+                                        if let Some(p) = &mut player {
+                                            p.stop()?;
+                                        }
+                                        paused = true;
+                                    }
+                                }
+                            }
+                            Keycode::F if !repeat => {
+                                toggle_desktop_fullscreen(&mut canvas, &mouse_util)?;
+                            }
+                            _ => {}
+                        }
+                    }
                 }
                 _ => {}
             }
         }
 
-        if paused {
-            redraw_cached_frame_if_needed(
-                &mut redraw_cached_frame,
+        if quit {
+            set_window_mouse_capture(&mut canvas, &mouse_util, false);
+            return Ok(());
+        }
+
+        let render_style = RenderStyle::from_config(&engine.config);
+        let blink_on = (now.duration_since(started_at).as_millis() / 500) % 2 == 0;
+        let toast_text = toast
+            .as_ref()
+            .filter(|(_, at)| now.duration_since(*at) < TOAST_DURATION)
+            .map(|(text, _)| text.clone());
+
+        if !is_playing(&engine, paused) {
+            // Paused / unloaded / finished: the party stopped, so the bars fall to the floor and
+            // the high-water peaks keep falling under gravity until everything settles.
+            decay_frame(&mut engine.last_frame, frame_delta, pause_decay);
+            let high_water = high_water_lines.update(&engine.last_frame, frame_delta, fall_acceleration);
+            render_scene(
                 &mut canvas,
-                &last_frame,
-                &last_debug_frame,
-                debug_fft_overlay,
+                &engine,
                 render_style,
-                high_water_lines.values(),
+                high_water,
+                debug_fft_overlay,
+                debug_ui,
+                &palette,
+                paused,
+                toast_text.as_deref(),
+                blink_on,
             )?;
+            last_frame_for_ts = None;
             std::thread::sleep(frame_delta);
             continue;
         }
 
-        if let Some(last_frame_for) = &last_frame_for_ts {
+        if let Some(last_frame_for) = last_frame_for_ts {
             let cur_frame_for = last_frame_for.add(frame_delta);
-            let cur_audio_at = now;
-            // three cases: we're behind by more than one frame, we're ahead by more than one frame, or we're in line
+            let status = frame_status(cur_frame_for, now, frame_delta);
 
-            let status = if cur_frame_for > cur_audio_at {
-                let t_delta = cur_frame_for - cur_audio_at;
-                if t_delta > frame_delta {
-                    // we're ahead by more than one frame
-                    t_delta.div_duration_f64(frame_delta) as i32
-                } else {
-                    0
-                }
-            } else if cur_frame_for < cur_audio_at {
-                let t_delta = cur_audio_at - cur_frame_for;
-                if t_delta > frame_delta {
-                    // we're behind by more than one frame
-                    -(t_delta.div_duration_f64(frame_delta) as i32)
-                } else {
-                    0
-                }
-            } else {
-                0
-            };
-
-            if status.abs() > 1 {
-                println!("status = {}", status);
-            }
             if status > 0 {
-                redraw_cached_frame_if_needed(
-                    &mut redraw_cached_frame,
+                // Ahead of the audio: just redraw the current frame and wait.
+                render_scene(
                     &mut canvas,
-                    &last_frame,
-                    &last_debug_frame,
-                    debug_fft_overlay,
+                    &engine,
                     render_style,
                     high_water_lines.values(),
+                    debug_fft_overlay,
+                    debug_ui,
+                    &palette,
+                    paused,
+                    toast_text.as_deref(),
+                    blink_on,
                 )?;
                 std::thread::sleep(frame_delta);
             } else {
                 last_frame_for_ts = Some(cur_frame_for);
-                if !paused {
-                    if status < 0 {
-                        redraw_cached_frame_if_needed(
-                            &mut redraw_cached_frame,
-                            &mut canvas,
-                            &last_frame,
-                            &last_debug_frame,
-                            debug_fft_overlay,
-                            render_style,
-                            high_water_lines.values(),
-                        )?;
-                    }
-                    match (frames.next_frame()?, debug_frames.next_frame()?) {
-                        (Some(frame), Some(debug_frame)) => {
-                            if status == 0 {
-                                redraw_cached_frame = false;
-                                last_frame.clear();
-                                last_frame.extend_from_slice(frame);
-                                last_debug_frame.clear();
-                                last_debug_frame.extend_from_slice(debug_frame);
-                                let debug_frame = if debug_fft_overlay {
-                                    Some(&last_debug_frame[..])
-                                } else {
-                                    None
-                                };
-                                let high_water_values = high_water_lines.update(
-                                    &last_frame,
-                                    frame_delta,
-                                    high_water_fall_acceleration,
-                                );
-                                draw_frame(
-                                    &mut canvas,
-                                    &last_frame,
-                                    debug_frame,
-                                    render_style,
-                                    high_water_values,
-                                )?;
-                            }
-                        }
-                        _ => {
-                            wav_player.stop()?;
-                            return Ok(());
-                        }
-                    }
+                if status < 0 {
+                    // Behind: advance without drawing to catch back up to the audio.
+                    engine.advance()?;
+                } else if engine.advance()? {
+                    let high_water = high_water_lines.update(
+                        &engine.last_frame,
+                        frame_delta,
+                        fall_acceleration,
+                    );
+                    render_scene(
+                        &mut canvas,
+                        &engine,
+                        render_style,
+                        high_water,
+                        debug_fft_overlay,
+                        debug_ui,
+                        &palette,
+                        paused,
+                        toast_text.as_deref(),
+                        blink_on,
+                    )?;
                 }
             }
         } else {
-            redraw_cached_frame_if_needed(
-                &mut redraw_cached_frame,
+            render_scene(
                 &mut canvas,
-                &last_frame,
-                &last_debug_frame,
-                debug_fft_overlay,
+                &engine,
                 render_style,
                 high_water_lines.values(),
+                debug_fft_overlay,
+                debug_ui,
+                &palette,
+                paused,
+                toast_text.as_deref(),
+                blink_on,
             )?;
             last_frame_for_ts = Some(now.add(frame_for_offset));
         }
     }
+}
+
+/// Are we ahead of (>0), behind (<0), or in line with (0) the audio clock?
+fn frame_status(cur_frame_for: Instant, cur_audio_at: Instant, frame_delta: Duration) -> i32 {
+    if cur_frame_for > cur_audio_at {
+        let t_delta = cur_frame_for - cur_audio_at;
+        if t_delta > frame_delta {
+            t_delta.div_duration_f64(frame_delta) as i32
+        } else {
+            0
+        }
+    } else if cur_frame_for < cur_audio_at {
+        let t_delta = cur_audio_at - cur_frame_for;
+        if t_delta > frame_delta {
+            -(t_delta.div_duration_f64(frame_delta) as i32)
+        } else {
+            0
+        }
+    } else {
+        0
+    }
+}
+
+/// Exponentially shrink every bar toward the floor, framerate-independently.
+fn decay_frame(frame: &mut [Channeled<VizFloat>], dt: Duration, half_life_secs: VizFloat) {
+    if frame.is_empty() {
+        return;
+    }
+    let half_life = half_life_secs.max(1e-3);
+    let factor = (0.5_f64).powf(dt.as_secs_f64() / half_life);
+    for c in frame.iter_mut() {
+        *c = c.map(|v| v * factor);
+    }
+}
+
+fn do_seek(engine: &mut VizEngine, player: &mut Option<WavPlayer>, secs: f64) -> Result<()> {
+    let frames = (secs * engine.config.fps as f64).round() as isize;
+    engine.seek_frames(frames)?;
+    if let Some(p) = player {
+        p.seek_secs(secs)?;
+    }
+    Ok(())
+}
+
+/// The result of running a palette command.
+struct Outcome {
+    quit: bool,
+    message: String,
+}
+
+fn ok_msg(message: impl Into<String>) -> Result<Outcome, String> {
+    Ok(Outcome {
+        quit: false,
+        message: message.into(),
+    })
+}
+
+/// Apply a parsed command to the live engine / player. Errors are returned as user-facing
+/// strings for the palette to show; the visualizer loop never crashes on a bad command.
+fn apply_command(
+    cmd: Command,
+    engine: &mut VizEngine,
+    player: &mut Option<WavPlayer>,
+    audio: &AudioSubsystem,
+    paused: &mut bool,
+    high_water: &mut HighWaterLines,
+    last_frame_for_ts: &mut Option<Instant>,
+) -> Result<Outcome, String> {
+    match cmd {
+        Command::Set { key, value } => {
+            let desc =
+                ParamDesc::find(&key).ok_or_else(|| format!("unknown setting {:?}", key))?;
+            let mut new_cfg = engine.config;
+            let old_fps = new_cfg.fps;
+            desc.apply(&mut new_cfg, &value)?;
+            engine.config = validate_config(new_cfg).map_err(|e| e.to_string())?;
+            if desc.rebuild {
+                if key.eq_ignore_ascii_case("fps") {
+                    engine.rescale_position(old_fps, engine.config.fps);
+                    *last_frame_for_ts = None;
+                }
+                engine.reload_and_refresh().map_err(|e| e.to_string())?;
+            }
+            ok_msg(format!("{} = {}", key, value))
+        }
+        Command::Theme(name) => {
+            let theme = Theme::find(&name)
+                .ok_or_else(|| format!("unknown theme {:?} (Tab to list)", name))?;
+            let mut new_cfg = engine.config;
+            theme.apply(&mut new_cfg);
+            engine.config = validate_config(new_cfg).map_err(|e| e.to_string())?;
+            ok_msg(format!("theme {}", theme.key))
+        }
+        Command::Load(path) => {
+            engine
+                .load(&path)
+                .map_err(|e| format!("load failed: {}", e))?;
+            let wav = WavFile::open(&path, BUF_SIZE).map_err(|e| e.to_string())?;
+            let mut new_player = WavPlayer::new(audio.clone(), wav);
+            new_player.play().map_err(|e| e.to_string())?;
+            *player = Some(new_player);
+            *paused = false;
+            high_water.reset();
+            *last_frame_for_ts = None;
+            ok_msg(format!("loaded {}", short_name(&path)))
+        }
+        Command::Unload => {
+            if let Some(p) = player {
+                p.stop().ok();
+            }
+            *player = None;
+            engine.unload();
+            *paused = false;
+            *last_frame_for_ts = None;
+            ok_msg("unloaded")
+        }
+        Command::Play => {
+            if !engine.is_loaded() {
+                return Err("no song loaded".into());
+            }
+            if engine.is_ended() {
+                return Err("song ended - seek back or load".into());
+            }
+            if *paused {
+                if let Some(p) = player {
+                    p.play().map_err(|e| e.to_string())?;
+                }
+                *paused = false;
+                *last_frame_for_ts = None;
+            }
+            ok_msg("playing")
+        }
+        Command::Pause => {
+            if !engine.is_loaded() {
+                return Err("no song loaded".into());
+            }
+            if !*paused {
+                if let Some(p) = player {
+                    p.stop().map_err(|e| e.to_string())?;
+                }
+                *paused = true;
+            }
+            ok_msg("paused")
+        }
+        Command::Toggle => {
+            if !engine.is_loaded() {
+                return Err("no song loaded".into());
+            }
+            if *paused {
+                if let Some(p) = player {
+                    p.play().map_err(|e| e.to_string())?;
+                }
+                *paused = false;
+                *last_frame_for_ts = None;
+                ok_msg("playing")
+            } else {
+                if let Some(p) = player {
+                    p.stop().map_err(|e| e.to_string())?;
+                }
+                *paused = true;
+                ok_msg("paused")
+            }
+        }
+        Command::Seek(secs) => {
+            if !engine.is_loaded() {
+                return Err("no song loaded".into());
+            }
+            do_seek(engine, player, secs).map_err(|e| e.to_string())?;
+            high_water.reset();
+            *last_frame_for_ts = None;
+            ok_msg(format!("seek {:+}s", secs))
+        }
+        Command::Reload => {
+            let cfg = open_config_or_default().map_err(|e| e.to_string())?;
+            engine.config = cfg;
+            engine.reload_and_refresh().map_err(|e| e.to_string())?;
+            high_water.reset();
+            *last_frame_for_ts = None;
+            ok_msg("reloaded config")
+        }
+        Command::Help => {
+            ok_msg("set theme load unload play pause toggle seek reload quit")
+        }
+        Command::Quit => Ok(Outcome {
+            quit: true,
+            message: "bye".into(),
+        }),
+    }
+}
+
+// --- Scene rendering -----------------------------------------------------------------------
+
+fn render_scene(
+    canvas: &mut WindowCanvas,
+    engine: &VizEngine,
+    render_style: RenderStyle,
+    high_water_values: &[VizFloat],
+    debug_fft_overlay: bool,
+    debug_ui: bool,
+    palette: &Palette,
+    paused: bool,
+    toast: Option<&str>,
+    blink_on: bool,
+) -> Result<()> {
+    canvas.set_draw_color(to_sdl_color(render_style.background_color));
+    canvas.clear();
+
+    if !engine.last_frame.is_empty() {
+        let debug = if debug_fft_overlay && !engine.last_debug_frame.is_empty() {
+            Some(engine.last_debug_frame.as_slice())
+        } else {
+            None
+        };
+        draw_bars_scene(canvas, &engine.last_frame, debug, render_style, high_water_values)?;
+    }
+
+    if debug_ui {
+        draw_debug_ui(canvas, engine, paused)?;
+    }
+    if palette.open {
+        draw_palette(canvas, engine, palette, blink_on)?;
+    } else if let Some(text) = toast {
+        draw_toast(canvas, text)?;
+    }
+
+    canvas.present();
+    Ok(())
+}
+
+fn draw_panel(canvas: &mut WindowCanvas, x: i32, y: i32, w: i32, h: i32, color: Color) -> Result<()> {
+    if w <= 0 || h <= 0 {
+        return Ok(());
+    }
+    canvas.set_draw_color(color);
+    canvas
+        .fill_rect(Rect::new(x, y, w as u32, h as u32))
+        .map_err(map_sdl_err)
+}
+
+fn draw_debug_ui(canvas: &mut WindowCanvas, engine: &VizEngine, paused: bool) -> Result<()> {
+    let cfg = &engine.config;
+    let file = engine
+        .loaded_file()
+        .map(short_name)
+        .unwrap_or_else(|| "(no song)".to_string());
+    let lines = vec![
+        format!("vis-rs   {}   [Tab hides]", play_state(engine, paused)),
+        format!("song   {}", file),
+        format!(
+            "pos    {}   frame {}   fps {}",
+            format_time(engine.position_secs()),
+            engine.frame_index(),
+            cfg.fps
+        ),
+        format!(
+            "bins   {}   gamma {}   window {}ms",
+            cfg.binning.bins, cfg.binning.gamma, cfg.data_window_ms
+        ),
+        format!("freq   {:.0}..{:.0} Hz", cfg.binning.fmin, cfg.binning.fmax),
+        format!(
+            "alpha  {} / {}   dB {}..{}",
+            cfg.alpha0, cfg.alpha1, cfg.min_db, cfg.max_db
+        ),
+        format!(
+            "smooth {}/{} + {}/{}   levels {}",
+            cfg.smoothing0.window_size,
+            cfg.smoothing0.degree,
+            cfg.smoothing1.window_size,
+            cfg.smoothing1.degree,
+            cfg.binning.discrete_levels
+        ),
+        format!(
+            "decay  {}s   fall {}",
+            cfg.pause_decay_secs, cfg.high_water_line.fall_acceleration
+        ),
+        "press  /  for the command palette".to_string(),
+    ];
+
+    let scale = 2;
+    let pad = 6;
+    let w = lines.iter().map(|l| font::text_width(scale, l)).max().unwrap_or(0) + pad * 2;
+    let h = lines.len() as i32 * font::line_height(scale) + pad * 2;
+    draw_panel(canvas, MARGIN, MARGIN, w, h, panel_bg())?;
+
+    let mut y = MARGIN + pad;
+    let last = lines.len() - 1;
+    for (i, line) in lines.iter().enumerate() {
+        let color = if i == 0 {
+            TEXT_ACCENT
+        } else if i == last {
+            TEXT_DIM
+        } else {
+            TEXT_BRIGHT
+        };
+        font::draw_text(canvas, MARGIN + pad, y, scale, color, line)?;
+        y += font::line_height(scale);
+    }
+    Ok(())
+}
+
+fn draw_palette(
+    canvas: &mut WindowCanvas,
+    engine: &VizEngine,
+    palette: &Palette,
+    blink_on: bool,
+) -> Result<()> {
+    let (win_w, win_h) = canvas.output_size().map_err(map_sdl_err)?;
+    let cfg = &engine.config;
+
+    let input_scale = 3;
+    let list_scale = 2;
+    let pad = 10;
+
+    let suggestions = palette.suggestions(cfg);
+    let total = suggestions.len();
+    let visible = MAX_VISIBLE_SUGGESTIONS.min(total);
+    let has_counter = total > visible;
+    let ghost = palette.ghost(cfg);
+    let hint = palette.hint(cfg);
+
+    let mut height = pad + font::line_height(input_scale);
+    if hint.is_some() {
+        height += font::line_height(list_scale);
+    }
+    if palette.status.is_some() {
+        height += font::line_height(list_scale);
+    }
+    if total > 0 {
+        height += 6 + visible as i32 * font::line_height(list_scale);
+        if has_counter {
+            height += font::line_height(list_scale);
+        }
+    }
+    height += pad;
+
+    let panel_x = MARGIN;
+    let panel_w = win_w as i32 - MARGIN * 2;
+    let panel_y = win_h as i32 - MARGIN - height;
+    draw_panel(canvas, panel_x, panel_y, panel_w, height, panel_bg_strong())?;
+
+    let x = panel_x + pad;
+    let mut y = panel_y + pad;
+
+    // Input line: prompt, typed text, dim ghost completion, blinking caret.
+    let mut cx = x;
+    font::draw_text(canvas, cx, y, input_scale, TEXT_ACCENT, "> ")?;
+    cx += 2 * font::advance(input_scale);
+    font::draw_text(canvas, cx, y, input_scale, TEXT_BRIGHT, &palette.input)?;
+    cx += palette.input.chars().count() as i32 * font::advance(input_scale);
+    if let Some(ghost) = &ghost {
+        font::draw_text(canvas, cx, y, input_scale, TEXT_DIM, ghost)?;
+    }
+    if blink_on {
+        draw_panel(
+            canvas,
+            cx,
+            y,
+            input_scale as i32,
+            font::GLYPH_H as i32 * input_scale as i32,
+            Color::RGB(TEXT_BRIGHT.r, TEXT_BRIGHT.g, TEXT_BRIGHT.b),
+        )?;
+    }
+    y += font::line_height(input_scale);
+
+    if let Some(hint) = &hint {
+        font::draw_text(canvas, x, y, list_scale, TEXT_DIM, hint)?;
+        y += font::line_height(list_scale);
+    }
+    if let Some(status) = &palette.status {
+        font::draw_text(canvas, x, y, list_scale, TEXT_ERR, status)?;
+        y += font::line_height(list_scale);
+    }
+
+    if total > 0 {
+        y += 6;
+        let selected = palette.selected.min(total - 1);
+        let scroll = palette.scroll.min(total - visible);
+        let arrow_x = panel_x + panel_w - pad - font::advance(list_scale);
+        for row in 0..visible {
+            let idx = scroll + row;
+            let sugg = &suggestions[idx];
+            let is_selected = idx == selected;
+            if is_selected {
+                draw_panel(
+                    canvas,
+                    panel_x + 4,
+                    y - 2,
+                    panel_w - 8,
+                    font::line_height(list_scale),
+                    highlight_bg(),
+                )?;
+            }
+            let (marker, label_color) = if is_selected {
+                ("> ", TEXT_BRIGHT)
+            } else {
+                ("  ", TEXT_DIM)
+            };
+            let mut sx = x;
+            font::draw_text(canvas, sx, y, list_scale, TEXT_ACCENT, marker)?;
+            sx += 2 * font::advance(list_scale);
+            font::draw_text(canvas, sx, y, list_scale, label_color, &sugg.label)?;
+            let detail_x = sx + 20 * font::advance(list_scale);
+            font::draw_text(canvas, detail_x, y, list_scale, TEXT_DIM, &sugg.detail)?;
+            // Scroll affordances: a caret when there's more above / below the window.
+            if row == 0 && scroll > 0 {
+                font::draw_text(canvas, arrow_x, y, list_scale, TEXT_ACCENT, "^")?;
+            }
+            if row + 1 == visible && scroll + visible < total {
+                font::draw_text(canvas, arrow_x, y, list_scale, TEXT_ACCENT, "v")?;
+            }
+            y += font::line_height(list_scale);
+        }
+        if has_counter {
+            let counter = format!(
+                "{}-{} of {}   up/dn to scroll",
+                scroll + 1,
+                scroll + visible,
+                total
+            );
+            font::draw_text(canvas, x, y, list_scale, TEXT_DIM, &counter)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn draw_toast(canvas: &mut WindowCanvas, text: &str) -> Result<()> {
+    let (_win_w, win_h) = canvas.output_size().map_err(map_sdl_err)?;
+    let scale = 2;
+    let pad = 6;
+    let w = font::text_width(scale, text) + pad * 2;
+    let h = font::line_height(scale) + pad * 2;
+    let x = MARGIN;
+    let y = win_h as i32 - MARGIN - h;
+    draw_panel(canvas, x, y, w, h, panel_bg())?;
+    font::draw_text(canvas, x + pad, y + pad, scale, TEXT_OK, text)?;
+    Ok(())
+}
+
+fn format_time(secs: f64) -> String {
+    let secs = secs.max(0.0);
+    let minutes = (secs / 60.0).floor() as u64;
+    let seconds = secs - (minutes as f64) * 60.0;
+    format!("{}:{:04.1}", minutes, seconds)
+}
+
+fn short_name(path: &str) -> String {
+    path.rsplit(|c| c == '/' || c == '\\')
+        .next()
+        .unwrap_or(path)
+        .to_string()
 }
 
 fn toggle_desktop_fullscreen(
@@ -398,78 +927,13 @@ fn scale_initial_window_dimension(display_dimension: u32) -> u32 {
         .min(u32::MAX as u64) as u32
 }
 
-fn create_data_src(
-    file: &str,
-) -> Result<(
-    impl Framed<Item = Channeled<VizFloat>>,
-    impl Framed<Item = VizFloat>,
-    VizPipelineConfig,
-    WavFile,
-)> {
-    const BUF_SIZE: usize = 32768;
-
-    let config = open_config_or_default()?;
-    let frame_src = create_viz_pipeline(WavFile::open(file, BUF_SIZE)?, config)?;
-    let debug_frame_src = create_debug_fft_pipeline(WavFile::open(file, BUF_SIZE)?, config)?;
-    Ok((
-        frame_src,
-        debug_frame_src,
-        config,
-        WavFile::open(file, BUF_SIZE)?,
-    ))
-}
-
 fn clear_canvas(canvas: &mut WindowCanvas, color: VizColor) {
     canvas.set_draw_color(to_sdl_color(color));
     canvas.clear();
     canvas.present();
 }
 
-fn draw_cached_frame(
-    canvas: &mut WindowCanvas,
-    frame: &[Channeled<VizFloat>],
-    debug_frame: &[VizFloat],
-    debug_fft_overlay: bool,
-    render_style: RenderStyle,
-    high_water_values: &[VizFloat],
-) -> Result<()> {
-    if frame.is_empty() {
-        clear_canvas(canvas, render_style.background_color);
-        return Ok(());
-    }
-
-    let debug_frame = if debug_fft_overlay && !debug_frame.is_empty() {
-        Some(debug_frame)
-    } else {
-        None
-    };
-    draw_frame(canvas, frame, debug_frame, render_style, high_water_values)
-}
-
-fn redraw_cached_frame_if_needed(
-    redraw_cached_frame: &mut bool,
-    canvas: &mut WindowCanvas,
-    frame: &[Channeled<VizFloat>],
-    debug_frame: &[VizFloat],
-    debug_fft_overlay: bool,
-    render_style: RenderStyle,
-    high_water_values: &[VizFloat],
-) -> Result<()> {
-    if *redraw_cached_frame {
-        *redraw_cached_frame = false;
-        draw_cached_frame(
-            canvas,
-            frame,
-            debug_frame,
-            debug_fft_overlay,
-            render_style,
-            high_water_values,
-        )?;
-    }
-    Ok(())
-}
-
-fn draw_frame(
+fn draw_bars_scene(
     canvas: &mut WindowCanvas,
     frame: &[Channeled<VizFloat>],
     debug_fft_overlay: Option<&[VizFloat]>,
@@ -480,14 +944,11 @@ fn draw_frame(
     const MIN_HEIGHT: u32 = 4;
     const HIGH_WATER_LINE_HEIGHT: u32 = 1;
 
-    canvas.set_draw_color(to_sdl_color(render_style.background_color));
-    canvas.clear();
     let (width, height) = canvas.output_size().map_err(map_sdl_err)?;
 
     let avail_height = height.saturating_sub(BIN_MARGIN * 2);
     let n_bins = frame.len() as u32;
     if n_bins == 0 {
-        canvas.present();
         return Ok(());
     }
 
@@ -537,7 +998,6 @@ fn draw_frame(
         )?;
     }
 
-    canvas.present();
     Ok(())
 }
 
@@ -755,6 +1215,24 @@ mod tests {
                 peak: 1.0,
             }
         );
+    }
+
+    #[test]
+    fn decay_shrinks_bars_toward_floor() {
+        let mut frame = [Channeled::Mono(1.0), Channeled::Stereo(0.8, 0.4)];
+        // One half-life of elapsed time should roughly halve every value.
+        decay_frame(&mut frame, Duration::from_secs_f64(0.4), 0.4);
+        match frame[0] {
+            Channeled::Mono(v) => assert!((v - 0.5).abs() < 1e-9),
+            _ => panic!("expected mono"),
+        }
+        match frame[1] {
+            Channeled::Stereo(l, r) => {
+                assert!((l - 0.4).abs() < 1e-9);
+                assert!((r - 0.2).abs() < 1e-9);
+            }
+            _ => panic!("expected stereo"),
+        }
     }
 
     #[test]

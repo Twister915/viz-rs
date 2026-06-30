@@ -1,11 +1,11 @@
 use crate::channeled::Channeled;
-use crate::framed::{Sampled, Samples};
+use crate::framed::Samples;
 use crate::util::VizFloat;
 use crate::wav::WavFile;
 use anyhow::{Result, bail};
 use sdl2::AudioSubsystem;
 use sdl2::audio::{AudioCallback, AudioDevice, AudioSpecDesired};
-use std::ops::{Add, Mul, Sub};
+use std::ops::{Mul, Sub};
 use std::time::{Duration, Instant};
 
 enum WavStates {
@@ -86,19 +86,23 @@ impl WavPlayer {
         Ok(())
     }
 
-    pub fn seek(&mut self, amount: Duration) -> Result<()> {
+    /// Seek by a signed number of seconds (negative seeks backward), used by the command
+    /// palette and the arrow-key jumps.
+    pub fn seek_secs(&mut self, secs: f64) -> Result<()> {
         let was_playing = matches!(self.state, WavStates::Playing(_));
-        let seek_to = Instant::now().add(amount);
         self.stop()?;
         if let WavStates::Ready(player) = &mut self.state {
-            let amount = seek_to.sub(Instant::now());
-            let skip_samples = player.source.samples_from_dur(amount);
-            let skip_time =
-                Duration::from_nanos(1_000_000_000 / (player.source.sample_rate as u64))
-                    .mul(skip_samples as u32);
-            player.source.seek_samples(skip_samples as isize)?;
-            player.at += skip_time;
-            player.file_at += skip_time;
+            let sample_rate = player.source.sample_rate as f64;
+            let skip_samples = (secs * sample_rate).round() as isize;
+            let skip_time = Duration::from_secs_f64(secs.abs());
+            player.source.seek_samples(skip_samples)?;
+            if secs >= 0.0 {
+                player.at += skip_time;
+                player.file_at += skip_time;
+            } else {
+                player.at = player.at.saturating_sub(skip_time);
+                player.file_at = player.file_at.saturating_sub(skip_time);
+            }
         } else {
             bail!("player state was not ready after stop")
         }

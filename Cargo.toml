@@ -10,7 +10,10 @@ rust-version = "1.85"
 [dependencies]
 anyhow = "1.0.103"
 fftw = "0.8.0"
-sdl2 = "0.38.0"
+# Build SDL2 from the vendored source at compile time and statically link it
+# into the binary, so no external SDL2.dll / SDL2.lib is ever needed.
+# Requires a C compiler + cmake at build time (both ship with Visual Studio).
+sdl2 = { version = "0.38.0", features = ["bundled", "static-link"] }
 rayon = "1.12.0"
 num-rational = "0.4.2"
 serde = { version = "1.0.228", features = ["derive"] }

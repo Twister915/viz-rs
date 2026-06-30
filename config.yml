@@ -41,13 +41,22 @@ data_window_ms: 136
 #   color: "#ffffff"
 #   fall_acceleration: 1.0
 
-Theme: Rain Washed Glass
-background_color: "#b6ccd8"
-bar_color: "#476f8f"
-bar_difference_color: "#a9d8ed"
-debug_fft_overlay_color: "#33546d"
+# Theme: Rain Washed Glass
+# background_color: "#b6ccd8"
+# bar_color: "#476f8f"
+# bar_difference_color: "#a9d8ed"
+# debug_fft_overlay_color: "#33546d"
+# high_water_line:
+#   color: "#eef8ff"
+#   fall_acceleration: 1.0
+
+# Theme: Neon Salmon
+background_color: "#0a0510"
+bar_color: "#fa8072"
+bar_difference_color: "#ff1b8b"
+debug_fft_overlay_color: "#5a2740"
 high_water_line:
-  color: "#eef8ff"
+  color: "#ffd0e0"
   fall_acceleration: 1.0
 
 # Theme: Dark Songs
@@ -121,6 +130,9 @@ high_water_line:
 # high_water_line:
 #   color: "#f7fdff"
 #   fall_acceleration: 1.0
+
+# Seconds for the bars to halve when paused / unloaded / finished ("party stopped").
+pause_decay_secs: 0.4
 
 alpha0: 0.75
 alpha1: 0.35
